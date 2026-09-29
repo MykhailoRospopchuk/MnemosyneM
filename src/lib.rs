@@ -7,16 +7,16 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     }
 
     let mut dot_product = 0f32;
-    let mut sqrot_sq_a = 0f32;
-    let mut sqrot_sq_b = 0f32;
+    let mut sqrt_sq_a = 0f32;
+    let mut sqrt_sq_b = 0f32;
 
     for (&x, &y) in a.iter().zip(b.iter()) {
         dot_product += x * y;
-        sqrot_sq_a += x * x;
-        sqrot_sq_b += y * y;
+        sqrt_sq_a += x * x;
+        sqrt_sq_b += y * y;
     }
 
-    Ok(dot_product / (sqrot_sq_a.sqrt() * sqrot_sq_b.sqrt()))
+    Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
 pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> {
@@ -118,7 +118,7 @@ impl ClipEngine {
         if embed_vec.is_empty() {
             return Err("embed image not found".to_string());
         }
-        
+
         let first_embed_vec = embed_vec.pop().unwrap();
         Ok(first_embed_vec)
     }
