@@ -1,3 +1,4 @@
+use fastembed::{EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
 use serde::{Deserialize, Serialize};
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
@@ -53,6 +54,11 @@ pub struct MemeStore {
     memes: Vec<Meme>,
 }
 
+pub struct ClipEngine {
+    text_model: TextEmbedding,
+    image_model: ImageEmbedding,
+}
+
 impl Meme {
     pub fn new(id: u64, title: String, embeding: Vec<f32>) -> Self {
         Self {id, title, embeding }
@@ -84,5 +90,36 @@ impl MemeStore {
         let save_result  = serde_json::from_str::<MemeStore>(&json).map_err(|e| e.to_string())?;
 
         Ok(save_result)
+    }
+}
+
+impl ClipEngine {
+    pub fn new() -> Result<Self, String> {
+        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::ClipVitB32)).map_err(|e| e.to_string())?;
+        let image_model = ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)).map_err(|e| e.to_string())?;
+
+        Ok(Self { text_model, image_model })
+    }
+
+    pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let mut embed_vec = self.text_model.embed(vec![text], None).map_err(|e| e.to_string())?;
+
+        if embed_vec.is_empty() {
+            return Err("embed text is empty".to_string());
+        }
+
+        let first_embed_vec = embed_vec.pop().unwrap();
+
+        Ok(first_embed_vec)
+    }
+
+    pub fn embed_image(&mut self, path: &str) -> Result<Vec<f32>, String> {
+        let mut embed_vec = self.image_model.embed(vec![path], None).map_err(|e| e.to_string())?;
+        if embed_vec.is_empty() {
+            return Err("embed image not found".to_string());
+        }
+        
+        let first_embed_vec = embed_vec.pop().unwrap();
+        Ok(first_embed_vec)
     }
 }
