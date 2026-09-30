@@ -13,8 +13,8 @@ fn test_cosine_similarity() {
 fn test_find_best_usage() {
     let candidate = [1.2, 2.4, 4.2, 10f32];
     let memes = vec! [
-        Meme::new(1, String::from("bobr_secta"), Vec::from(candidate)),
-        Meme::new(2, String::from("chicken_secta"), vec![8.2, 2.4, 4.2, 10f32])
+        Meme::new(1, String::from("bobr_secta"), Vec::from(candidate), "some text".to_string()),
+        Meme::new(2, String::from("chicken_secta"), vec![8.2, 2.4, 4.2, 10f32], "some another text".to_string()),
     ];
 
     let result = find_best_usage(&candidate, &memes);
@@ -23,7 +23,7 @@ fn test_find_best_usage() {
 
 #[test]
 fn test_meme_storage() {
-    let meme = Meme::new(1, String::from("bobr_secta"), vec![8.2, 2.4, 4.2, 10f32]);
+    let meme = Meme::new(1, String::from("bobr_secta"), vec![8.2, 2.4, 4.2, 10f32], "there to new text".to_string());
 
     let mut meme_storage = MemeStore::new();
 

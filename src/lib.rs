@@ -43,9 +43,10 @@ pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> 
 #[derive(PartialEq)]
 #[derive(Serialize, Deserialize)]
 pub struct Meme {
-    id: u64,
-    title: String,
-    embeding: Vec<f32>,
+    pub id: u64,
+    pub title: String,
+    pub embeding: Vec<f32>,
+    pub file_path: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -60,8 +61,8 @@ pub struct ClipEngine {
 }
 
 impl Meme {
-    pub fn new(id: u64, title: String, embeding: Vec<f32>) -> Self {
-        Self {id, title, embeding }
+    pub fn new(id: u64, title: String, embeding: Vec<f32>, file_path: String) -> Self {
+        Self {id, title, embeding, file_path }
     }
 }
 
@@ -90,6 +91,23 @@ impl MemeStore {
         let save_result  = serde_json::from_str::<MemeStore>(&json).map_err(|e| e.to_string())?;
 
         Ok(save_result)
+    }
+
+    pub fn add_from_file(&mut self, id: u64, title: String, file_path: String, engine: &mut ClipEngine) -> Result<(), String> {
+        let embed = engine.embed_image(&file_path).map_err(|e| e.to_string())?;
+
+        let meme = Meme::new(id, title, embed, file_path);
+        self.add(meme);
+
+        Ok(())
+    }
+
+    pub fn search<'a>(&'a self, query_text: &str, engine: &mut ClipEngine) -> Result<Option<&'a Meme>, String> {
+        let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
+
+        let best_match = self.find_best(&embed);
+        
+        Ok(best_match)
     }
 }
 
