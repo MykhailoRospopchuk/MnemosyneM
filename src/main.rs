@@ -1,36 +1,107 @@
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use teloxide::Bot;
+use teloxide::net::Download;
+use teloxide::types::{InputFile, Message};
+use teloxide::prelude::*;
 use MnemosyneM::{cosine_similarity, ClipEngine, MemeStore};
 
-fn main() {
+struct AppState {
+    meme_store: Mutex<MemeStore>,
+    engine: Mutex<ClipEngine>
+}
+
+#[tokio::main]
+async fn main() {
     println!("Hello, world!");
-    let mut engine = ClipEngine::new().unwrap();
-    let embed_text_related = engine.embed_text("A German Shepherd is looking at a monitor").unwrap();
-    let embed_text_unrelated = engine.embed_text("money cards and two barrels").unwrap();
-    let embed_image = engine.embed_image("samples/photo_2026-07-15_08-58-27.jpg").unwrap();
 
-    let sim_texts_mismatch = cosine_similarity(&embed_text_related, &embed_text_unrelated).unwrap();
-    let sim_match = cosine_similarity(&embed_text_related, &embed_image).unwrap();
-    let sim_unrelated = cosine_similarity(&embed_text_unrelated, &embed_image).unwrap();
+    dotenvy::dotenv().ok();
+    println!("Loading storage and models...");
 
-    println!("Compare two text: {:?}", sim_texts_mismatch);
-    println!("Compare related text with image vector: {:?}", sim_match);
-    println!("Compare NOT related text with image vector: {:?}", sim_unrelated);
+    let engine = ClipEngine::new().expect("Failed to create clip engine");
+    let store = MemeStore::load_from_file("meme_storage.json").unwrap_or_else(|_| MemeStore::new());
 
-    let mut meme_store = MemeStore::new();
+    let state = Arc::new(AppState {
+        meme_store: Mutex::new(store),
+        engine: Mutex::new(engine)
+    });
 
-    meme_store.add_from_file(1, "powerful teacher explain with big boobs".to_string(), "samples/photo_1_2026-09-30_21-36-02.jpg".to_string(), &mut engine).unwrap();
-    meme_store.add_from_file(2, "chimpanzee have breakfast".to_string(), "samples/photo_2_2026-09-30_21-36-02.jpg".to_string(), &mut engine).unwrap();
-    meme_store.add_from_file(3, "dog with flower".to_string(), "samples/photo_3_2026-09-30_21-36-02.jpg".to_string(), &mut engine).unwrap();
-    meme_store.add_from_file(4, "lore update".to_string(), "samples/photo_4_2026-09-30_21-36-02.jpg".to_string(), &mut engine).unwrap();
-    meme_store.add_from_file(5, "cow on the beach".to_string(), "samples/photo_5_2026-09-30_21-36-02.jpg".to_string(), &mut engine).unwrap();
-    meme_store.add_from_file(6, "i dream of a great war of justice that will turn the American soil to ashes".to_string(), "samples/photo_2026-09-30_21-58-51.jpg".to_string(), &mut engine).unwrap();
+    let bot = Bot::from_env();
 
-    let best_match_meme = meme_store.search("north Korea citizen give interview", &mut engine).unwrap().unwrap();
+    println!("Let's get it started");
 
-    meme_store.save_to_file("meme_storage.json").unwrap();
+    teloxide::repl(bot, move |bot: Bot, msg: Message| {
+        let state = Arc::clone(&state);
+        async move {
+            if let Some(photos) = msg.photo(){
+                if let Some(photo) = photos.last() {
+                    bot.send_message(msg.chat.id, "Your meme has been confiscated...").await?;
 
-    println!("ID: {:?} | Title: {:?}", best_match_meme.id, best_match_meme.title);
+                    //  1. load file to storage
+                    let file = bot.get_file(photo.file.id.clone()).await?;
+                    let file_path = format!("samples/{}.jpeg", photo.file.unique_id);
+                    let mut destination = tokio::fs::File::create(&file_path).await.unwrap();
+                    bot.download_file(&file.path, &mut destination).await?;
 
+                    // 2. detect name and ID
+                    let title = msg.caption()
+                        .unwrap_or("no content from lazy user")
+                        .to_string();
 
+                    let id = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+
+                    let mut engine = state.engine.lock().await;
+                    let mut meme_store = state.meme_store.lock().await;
+
+                    match meme_store.add_from_file(id, title.clone(), file_path, &mut engine) {
+                        Ok(()) => {
+                            let _ = meme_store.save_to_file("meme_storage.json");
+                            bot.send_message(msg.chat.id, format!("[V] Your meme has been confiscated... {}", title)).await?;
+                        }
+                        Err(e) => {
+                            bot.send_message(msg.chat.id, format!("[X] Walter we lost it... {}", e)).await?;
+                        }
+                    }
+                }
+            }
+            else if let Some(text) = msg.text() {
+                if text == "/start" {
+                    bot.send_message(msg.chat.id, "Add meme description for search...").await?;
+                    return Ok(());
+                }
+
+                bot.send_message(msg.chat.id, "Process search...").await?;
+
+                let mut engine = state.engine.lock().await;
+                let meme_store = state.meme_store.lock().await;
+
+                match meme_store.search(text, &mut engine) {
+                    Ok(Some(meme)) => {
+                        if !std::path::Path::new(&meme.file_path).exists() { 
+                            bot.send_message(msg.chat.id, format!("Somebody stole your meme(((( {} !", meme.title)).await?;
+                        }
+                        bot.send_photo(
+                            msg.chat.id,
+                            InputFile::file(&meme.file_path))
+                            .caption(format!("🎯 {}", meme.title))
+                            .await?;
+                    }
+                    Ok(None) => {
+                        bot.send_message(msg.chat.id, "There is nothing here...").await?;
+                    }
+                    Err(e) => {
+                        bot.send_message(msg.chat.id, format!("Dead inside: {}", e)).await?;
+                    }
+                }
+            }
+            Ok(())
+        }
+
+    })
+        .await;
 
     println!("DONE!");
 }

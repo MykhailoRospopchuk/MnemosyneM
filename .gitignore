@@ -116,3 +116,5 @@ http-client.private.env.json
 
 
 .fastembed_cache
+
+*.env
