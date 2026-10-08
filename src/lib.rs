@@ -48,10 +48,15 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
         }
     }
 
+    top_k.retain(|(_, value)| value > &0.23);
     top_k.sort_by(|b, a| a.1.total_cmp(&b.1));
 
     top_k.truncate(k);
     top_k
+}
+
+pub fn score_calibration(raw_score: f32) -> f32 {
+    ((raw_score - 0.15) / (0.35 - 0.15) * 100.0).clamp(0.0, 100.0)
 }
 
 #[derive(Clone, Debug)]

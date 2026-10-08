@@ -3,9 +3,9 @@ use std::env;
 use tokio::sync::Mutex;
 use teloxide::Bot;
 use teloxide::net::Download;
-use teloxide::types::{InputFile, Message};
+use teloxide::types::{InputFile, InputMedia, InputMediaPhoto, Message};
 use teloxide::prelude::*;
-use MnemosyneM::{ClipEngine, MemeStore};
+use MnemosyneM::{score_calibration, ClipEngine, MemeStore, Meme};
 
 const TOP_K: usize = 3;
 
@@ -114,16 +114,29 @@ async fn main() {
                         bot.send_message(msg.chat.id, "There is nothing here...").await?;
                     }
                     Ok(results) => {
-                        for (meme, score) in results {
-                            if !std::path::Path::new(&meme.file_path).exists() {
-                                bot.send_message(msg.chat.id, format!("Somebody stole your meme(((( {} !", meme.title)).await?;
-                                continue;
-                            }
+                        let valid_memes:Vec<(&Meme, f32)> = results.into_iter().filter(|(meme, _)| std::path::Path::new(&meme.file_path).exists()).collect();
+
+                        if valid_memes.is_empty() {
+                            bot.send_message(msg.chat.id, "There is nothing useful here...").await?;
+                        }
+                        else if valid_memes.len() == 1 {
+                            let (single_meme, single_score) = valid_memes[0];
+
                             bot.send_photo(
                                 msg.chat.id,
-                                InputFile::file(&meme.file_path))
-                                .caption(format!("🎯 {} (Score: {:.3} %)", meme.title, score * 100.0))
+                                InputFile::file(&single_meme.file_path))
+                                .caption(format!("🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})", single_meme.title, score_calibration(single_score), single_score))
                                 .await?;
+                        }
+                        else {
+                            let media_group: Vec<InputMedia> = valid_memes.iter().map(|(meme, score)|
+                                InputMedia::Photo(
+                                    InputMediaPhoto::new(
+                                        InputFile::file(&meme.file_path))
+                                        .caption(format!("🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})", meme.title, score_calibration(*score), score))
+                            )).collect();
+
+                            bot.send_media_group(msg.chat.id, media_group).await?;
                         }
                     }
                     Err(e) => {
