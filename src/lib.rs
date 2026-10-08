@@ -39,6 +39,21 @@ pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> 
     Some(&memes[best_usage_idx.unwrap()])
 }
 
+pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Meme, f32)> {
+    let mut top_k : Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
+
+    for n in 0..memes.len() {
+        if let Ok(value) = cosine_similarity(query, &memes[n].embeding) {
+            top_k.push((&memes[n], value));
+        }
+    }
+
+    top_k.sort_by(|b, a| a.1.total_cmp(&b.1));
+
+    top_k.truncate(k);
+    top_k
+}
+
 #[derive(Clone, Debug)]
 #[derive(PartialEq)]
 #[derive(Serialize, Deserialize)]
@@ -77,6 +92,8 @@ impl MemeStore {
         find_best_usage(query, &self.memes)
     }
 
+    pub fn find_top_k(&self, query: &[f32], k: usize) -> Vec<(&Meme, f32)> { find_top_k(query, &self.memes, k) }
+
     pub fn save_to_file(&self, filename: &str) -> Result<(), String> {
         let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
 
@@ -108,6 +125,14 @@ impl MemeStore {
         let best_match = self.find_best(&embed);
         
         Ok(best_match)
+    }
+
+    pub fn search_top_k<'a>(&'a self, query_text: &str, engine: &mut ClipEngine, k: usize) -> Result<Vec<(&'a Meme, f32)>, String> {
+        let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
+
+        let top_k = self.find_top_k(&embed, k);
+
+        Ok(top_k)
     }
 }
 
