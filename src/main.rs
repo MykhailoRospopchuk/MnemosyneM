@@ -5,6 +5,7 @@ use teloxide::Bot;
 use teloxide::net::Download;
 use teloxide::types::{InputFile, InputMedia, InputMediaPhoto, Message};
 use teloxide::prelude::*;
+use teloxide::utils::command::{BotCommands};
 use MnemosyneM::{score_calibration, ClipEngine, MemeStore, Meme};
 
 const TOP_K: usize = 3;
@@ -12,6 +13,19 @@ const TOP_K: usize = 3;
 pub struct AppConfig{
     pub json_storage: String,
     pub top_k: usize,
+}
+
+#[derive(BotCommands, Clone)]
+#[command(rename_rule = "lowercase", description = "These commands are supported:")]
+enum Command{
+    #[command(description = "Start a new bot")]
+    Start,
+    #[command(description = "Show list of all commands")]
+    Help,
+    #[command(description = "Get statistics of memes")]
+    Stats,
+    #[command(description = "Show meme random meme")]
+    Random
 }
 
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -58,6 +72,7 @@ async fn main() {
     });
 
     let bot = Bot::from_env();
+    let _ = bot.set_my_commands(Command::bot_commands()).await.expect("Cannot set commands");
 
     println!("Let's get it started");
 
@@ -99,8 +114,39 @@ async fn main() {
                 }
             }
             else if let Some(text) = msg.text() {
-                if text == "/start" {
-                    bot.send_message(msg.chat.id, "Add meme description for search...").await?;
+                if text.starts_with('/'){
+                    match Command::parse(text, "") {
+                        Ok(Command::Start) => {
+                            bot.send_message(msg.chat.id, "Hi! I'm MnemosyneM - semantic meme search \n\
+                            Send me your meme pic and I will save it. \n\
+                            Text me your search and I will find your meme\n\n\
+                            List of commands: /help".to_string()).await?;
+                        }
+                        Ok(Command::Help) => {
+                            bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
+                        }
+                        Ok(Command::Stats) => {
+                            let meme_store = state.meme_store.lock().await;
+                            bot.send_message(msg.chat.id, format!("In storage we have [{}] memes", meme_store.len())).await?;
+                        }
+                        Ok(Command::Random) => {
+                            let meme_store = state.meme_store.lock().await;
+                            if let Some(meme) = meme_store.random_meme() {
+                                if std::path::Path::new(&meme.file_path).exists() {
+                                    bot.send_photo(msg.chat.id, InputFile::file(&meme.file_path))
+                                        .caption(format!("🎲 Випадковий мем: {}", meme.title))
+                                        .await?;
+                                } else {
+                                    bot.send_message(msg.chat.id, "Sorry your meme somebody stole(((").await?;
+                                }
+                            } else {
+                                bot.send_message(msg.chat.id, "What do yue even expect? Upload at least one meme").await?;
+                            }
+                        }
+                        Err(_) => {
+                            bot.send_message(msg.chat.id, "I have no idea what are you talking about. Use /help ...").await?;
+                        }
+                    }
                     return Ok(());
                 }
 

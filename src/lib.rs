@@ -1,3 +1,4 @@
+use std::time::SystemTime;
 use fastembed::{EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
 use serde::{Deserialize, Serialize};
 
@@ -105,6 +106,28 @@ impl MemeStore {
         std::fs::write(filename, json).map_err(|e| e.to_string())?;
 
         Ok(())
+    }
+
+    pub fn len(&self) -> usize {
+        self.memes.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn random_meme(&self) -> Option<&Meme> {
+        if self.is_empty() {
+            return None;
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+
+        let idx = nanos % self.memes.len();
+        Some(&self.memes[idx])
     }
 
     pub fn load_from_file(filename: &str) -> Result<Self, String> {
