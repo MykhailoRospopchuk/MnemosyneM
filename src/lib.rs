@@ -1,7 +1,10 @@
-use std::time::SystemTime;
-use fastembed::{EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
+use fastembed::{
+    EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding,
+    TextInitOptions,
+};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
-use rusqlite::{params, Connection, Params};
+use std::time::SystemTime;
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     if a.len() != b.len() {
@@ -21,7 +24,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
-pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> {
+pub fn find_best_usage<'a>(query: &[f32], memes: &'a [Meme]) -> Option<&'a Meme> {
     if memes.is_empty() {
         return None;
     }
@@ -29,7 +32,9 @@ pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> 
     let mut best_usage_idx = None;
     let mut best_usage = -1f32;
     for n in 0..memes.len() {
-        if let Ok(value) = cosine_similarity(query, &memes[n].embeding) && value > best_usage {
+        if let Ok(value) = cosine_similarity(query, &memes[n].embeding)
+            && value > best_usage
+        {
             best_usage_idx = Some(n);
             best_usage = value;
         }
@@ -42,7 +47,7 @@ pub fn find_best_usage<'a>(query: &[f32], memes: &'a[Meme]) -> Option<&'a Meme> 
 }
 
 pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Meme, f32)> {
-    let mut top_k : Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
+    let mut top_k: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
 
     for n in 0..memes.len() {
         if let Ok(value) = cosine_similarity(query, &memes[n].embeding) {
@@ -61,9 +66,7 @@ pub fn score_calibration(raw_score: f32) -> f32 {
     ((raw_score - 0.15) / (0.35 - 0.15) * 100.0).clamp(0.0, 100.0)
 }
 
-#[derive(Clone, Debug)]
-#[derive(PartialEq)]
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meme {
     pub id: u64,
     pub title: String,
@@ -84,18 +87,27 @@ pub struct ClipEngine {
 
 impl Meme {
     pub fn new(id: u64, title: String, embeding: Vec<f32>, file_path: String) -> Self {
-        Self {id, title, embeding, file_path }
+        Self {
+            id,
+            title,
+            embeding,
+            file_path,
+        }
     }
 }
 
 impl MemeStore {
     pub fn add(&mut self, meme: Meme) -> Result<(), String> {
-
         let blob = self::embedding_to_blob(&meme.embeding);
-        self.conn.execute(
-            "INSERT INTO memes (id, title, file_path, embedding) VALUES (?, ?, ?, ?)",
-            params![meme.id, meme.title, meme.file_path, blob],
-        ).map_err(|e| {e.to_string()})?;
+        self.conn
+            .execute(
+                "INSERT INTO memes (id, title, file_path, embedding)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (file_path)
+                DO UPDATE SET title = excluded.title;",
+                params![meme.id, meme.title, meme.file_path, blob],
+            )
+            .map_err(|e| e.to_string())?;
 
         self.memes.push(meme);
 
@@ -106,7 +118,9 @@ impl MemeStore {
         find_best_usage(query, &self.memes)
     }
 
-    pub fn find_top_k(&self, query: &[f32], k: usize) -> Vec<(&Meme, f32)> { find_top_k(query, &self.memes, k) }
+    pub fn find_top_k(&self, query: &[f32], k: usize) -> Vec<(&Meme, f32)> {
+        find_top_k(query, &self.memes, k)
+    }
 
     pub fn len(&self) -> usize {
         self.memes.len()
@@ -145,7 +159,13 @@ impl MemeStore {
     //     Ok(save_result)
     // }
 
-    pub fn add_from_file(&mut self, id: u64, title: String, file_path: String, engine: &mut ClipEngine) -> Result<(), String> {
+    pub fn add_from_file(
+        &mut self,
+        id: u64,
+        title: String,
+        file_path: String,
+        engine: &mut ClipEngine,
+    ) -> Result<(), String> {
         let embed = engine.embed_image(&file_path).map_err(|e| e.to_string())?;
 
         let meme = Meme::new(id, title, embed, file_path);
@@ -154,15 +174,41 @@ impl MemeStore {
         Ok(())
     }
 
-    pub fn search<'a>(&'a self, query_text: &str, engine: &mut ClipEngine) -> Result<Option<&'a Meme>, String> {
+    pub fn add_from_bytes(
+        &mut self,
+        id: u64,
+        title: String,
+        file_id: String,
+        image_bytes: &[u8],
+        engine: &mut ClipEngine,
+    ) -> Result<(), String> {
+        let embed = engine
+            .embed_image_from_bytes(&image_bytes.to_vec())
+            .map_err(|e| e.to_string())?;
+
+        let meme = Meme::new(id, title, embed, file_id);
+        self.add(meme)?;
+        Ok(())
+    }
+
+    pub fn search<'a>(
+        &'a self,
+        query_text: &str,
+        engine: &mut ClipEngine,
+    ) -> Result<Option<&'a Meme>, String> {
         let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
 
         let best_match = self.find_best(&embed);
-        
+
         Ok(best_match)
     }
 
-    pub fn search_top_k<'a>(&'a self, query_text: &str, engine: &mut ClipEngine, k: usize) -> Result<Vec<(&'a Meme, f32)>, String> {
+    pub fn search_top_k<'a>(
+        &'a self,
+        query_text: &str,
+        engine: &mut ClipEngine,
+        k: usize,
+    ) -> Result<Vec<(&'a Meme, f32)>, String> {
         let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
 
         let top_k = self.find_top_k(&embed, k);
@@ -172,27 +218,35 @@ impl MemeStore {
 
     pub fn open(db_connection: &str) -> Result<Self, String> {
         let conn = Connection::open(db_connection).map_err(|e| e.to_string())?;
-        conn.execute("\
+        conn.execute(
+            "\
         CREATE TABLE IF NOT EXISTS memes (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
             title TEXT NOT NULL, \
             file_path TEXT NOT NULL, \
             embedding BLOB NOT NULL\
-            )",
-                     []
-        ).map_err(|e| e.to_string())?;
+            );
 
-        let mut stmt = conn.prepare("SELECT * FROM memes").map_err(|e| e.to_string())?;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memes_file_path
+        ON memes(file_path);",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
 
-        let meme_iter = stmt.query_map([], |row| {
-            let id: u64 = row.get(0)?;
-            let title: String = row.get(1)?;
-            let file_path: String = row.get(2)?;
-            let blob: Vec<u8> = row.get(3)?;
-            let embedding = blob_to_embedding(&blob);
+        let mut stmt = conn
+            .prepare("SELECT * FROM memes")
+            .map_err(|e| e.to_string())?;
 
-            Ok(Meme::new(id, title, embedding, file_path))
-        })
+        let meme_iter = stmt
+            .query_map([], |row| {
+                let id: u64 = row.get(0)?;
+                let title: String = row.get(1)?;
+                let file_path: String = row.get(2)?;
+                let blob: Vec<u8> = row.get(3)?;
+                let embedding = blob_to_embedding(&blob);
+
+                Ok(Meme::new(id, title, embedding, file_path))
+            })
             .map_err(|e| e.to_string())?;
 
         let mut memes: Vec<Meme> = Vec::new();
@@ -210,14 +264,23 @@ impl MemeStore {
 
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
-        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::ClipVitB32)).map_err(|e| e.to_string())?;
-        let image_model = ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32)).map_err(|e| e.to_string())?;
+        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::ClipVitB32))
+            .map_err(|e| e.to_string())?;
+        let image_model =
+            ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32))
+                .map_err(|e| e.to_string())?;
 
-        Ok(Self { text_model, image_model })
+        Ok(Self {
+            text_model,
+            image_model,
+        })
     }
 
     pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
-        let mut embed_vec = self.text_model.embed(vec![text], None).map_err(|e| e.to_string())?;
+        let mut embed_vec = self
+            .text_model
+            .embed(vec![text], None)
+            .map_err(|e| e.to_string())?;
 
         if embed_vec.is_empty() {
             return Err("embed text is empty".to_string());
@@ -229,13 +292,27 @@ impl ClipEngine {
     }
 
     pub fn embed_image(&mut self, path: &str) -> Result<Vec<f32>, String> {
-        let mut embed_vec = self.image_model.embed(vec![path], None).map_err(|e| e.to_string())?;
+        let mut embed_vec = self
+            .image_model
+            .embed(vec![path], None)
+            .map_err(|e| e.to_string())?;
         if embed_vec.is_empty() {
             return Err("embed image not found".to_string());
         }
 
         let first_embed_vec = embed_vec.pop().unwrap();
         Ok(first_embed_vec)
+    }
+
+    pub fn embed_image_from_bytes(&mut self, bytes: &Vec<u8>) -> Result<Vec<f32>, String> {
+        let mut embed_vec = self
+            .image_model
+            .embed_bytes(&[bytes], None)
+            .map_err(|e| e.to_string())?;
+
+        embed_vec
+            .pop()
+            .ok_or_else(|| "embed image not found".to_string())
     }
 }
 
