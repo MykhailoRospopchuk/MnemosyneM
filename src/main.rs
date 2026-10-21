@@ -107,6 +107,7 @@ async fn main() {
                         .as_secs();
 
                     let telegram_file_id = photo.file.id.0.clone();
+                    let telegram_file_unique_id = photo.file.unique_id.0.clone();
 
                     let mut engine = state.engine.lock().await;
                     let mut meme_store = state.meme_store.lock().await;
@@ -115,6 +116,7 @@ async fn main() {
                         id,
                         title.clone(),
                         telegram_file_id,
+                        telegram_file_unique_id,
                         &image_butes,
                         &mut engine,
                     ) {
@@ -163,10 +165,10 @@ async fn main() {
                         Ok(Command::Random) => {
                             let meme_store = state.meme_store.lock().await;
                             if let Some(meme) = meme_store.random_meme() {
-                                if !meme.file_path.is_empty() {
+                                if !meme.file_tg_id.is_empty() {
                                     bot.send_photo(
                                         msg.chat.id,
-                                        InputFile::file_id(FileId(meme.file_path.clone())),
+                                        InputFile::file_id(FileId(meme.file_tg_id.clone())),
                                     )
                                     .caption(format!("🎲 Випадковий мем: {}", meme.title))
                                     .await?;
@@ -209,7 +211,7 @@ async fn main() {
                     Ok(results) => {
                         let valid_memes: Vec<(&Meme, f32)> = results
                             .into_iter()
-                            .filter(|(meme, _)| !meme.file_path.is_empty())
+                            .filter(|(meme, _)| !meme.file_tg_id.is_empty())
                             .collect();
 
                         if valid_memes.is_empty() {
@@ -220,7 +222,7 @@ async fn main() {
 
                             bot.send_photo(
                                 msg.chat.id,
-                                InputFile::file_id(FileId(single_meme.file_path.clone())),
+                                InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
                             )
                             .caption(format!(
                                 "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",
@@ -236,7 +238,7 @@ async fn main() {
                                     .map(|(meme, score)| {
                                         InputMedia::Photo(
                                             InputMediaPhoto::new(InputFile::file_id(FileId(
-                                                meme.file_path.clone(),
+                                                meme.file_tg_id.clone(),
                                             )))
                                             .caption(format!(
                                                 "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",

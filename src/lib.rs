@@ -55,7 +55,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
         }
     }
 
-    top_k.retain(|(_, value)| value > &0.23);
+    top_k.retain(|(_, value)| value > &0.19);
     top_k.sort_by(|b, a| a.1.total_cmp(&b.1));
 
     top_k.truncate(k);
@@ -71,7 +71,8 @@ pub struct Meme {
     pub id: u64,
     pub title: String,
     pub embeding: Vec<f32>,
-    pub file_path: String,
+    pub file_tg_id: String,
+    pub file_tg_unique_id: String,
 }
 
 #[derive(Debug)]
@@ -86,12 +87,19 @@ pub struct ClipEngine {
 }
 
 impl Meme {
-    pub fn new(id: u64, title: String, embeding: Vec<f32>, file_path: String) -> Self {
+    pub fn new(
+        id: u64,
+        title: String,
+        embeding: Vec<f32>,
+        file_tg_id: String,
+        file_tg_unique_id: String,
+    ) -> Self {
         Self {
             id,
             title,
             embeding,
-            file_path,
+            file_tg_id,
+            file_tg_unique_id,
         }
     }
 }
@@ -101,11 +109,17 @@ impl MemeStore {
         let blob = self::embedding_to_blob(&meme.embeding);
         self.conn
             .execute(
-                "INSERT INTO memes (id, title, file_path, embedding)
-                VALUES (?, ?, ?, ?)
-                ON CONFLICT (file_path)
+                "INSERT INTO memes (id, title, file_tg_id, file_tg_unique_id, embedding)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT (file_tg_unique_id)
                 DO UPDATE SET title = excluded.title;",
-                params![meme.id, meme.title, meme.file_path, blob],
+                params![
+                    meme.id,
+                    meme.title,
+                    meme.file_tg_id,
+                    meme.file_tg_unique_id,
+                    blob
+                ],
             )
             .map_err(|e| e.to_string())?;
 
@@ -163,12 +177,13 @@ impl MemeStore {
         &mut self,
         id: u64,
         title: String,
-        file_path: String,
+        file_tg_id: String,
+        file_tg_unique_id: String,
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
-        let embed = engine.embed_image(&file_path).map_err(|e| e.to_string())?;
+        let embed = engine.embed_image(&file_tg_id).map_err(|e| e.to_string())?;
 
-        let meme = Meme::new(id, title, embed, file_path);
+        let meme = Meme::new(id, title, embed, file_tg_id, file_tg_unique_id);
         self.add(meme)?;
 
         Ok(())
@@ -178,7 +193,8 @@ impl MemeStore {
         &mut self,
         id: u64,
         title: String,
-        file_id: String,
+        file_tg_id: String,
+        file_tg_unique_id: String,
         image_bytes: &[u8],
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
@@ -186,7 +202,7 @@ impl MemeStore {
             .embed_image_from_bytes(&image_bytes.to_vec())
             .map_err(|e| e.to_string())?;
 
-        let meme = Meme::new(id, title, embed, file_id);
+        let meme = Meme::new(id, title, embed, file_tg_id, file_tg_unique_id);
         self.add(meme)?;
         Ok(())
     }
@@ -223,12 +239,10 @@ impl MemeStore {
         CREATE TABLE IF NOT EXISTS memes (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
             title TEXT NOT NULL, \
-            file_path TEXT NOT NULL, \
+            file_tg_id TEXT NOT NULL, \
+            file_tg_unique_id TEXT NOT NULL UNIQUE, \
             embedding BLOB NOT NULL\
-            );
-
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_unique_memes_file_path
-        ON memes(file_path);",
+            );",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -241,11 +255,18 @@ impl MemeStore {
             .query_map([], |row| {
                 let id: u64 = row.get(0)?;
                 let title: String = row.get(1)?;
-                let file_path: String = row.get(2)?;
-                let blob: Vec<u8> = row.get(3)?;
+                let file_tg_id: String = row.get(2)?;
+                let file_tg_unique_id: String = row.get(3)?;
+                let blob: Vec<u8> = row.get(4)?;
                 let embedding = blob_to_embedding(&blob);
 
-                Ok(Meme::new(id, title, embedding, file_path))
+                Ok(Meme::new(
+                    id,
+                    title,
+                    embedding,
+                    file_tg_id,
+                    file_tg_unique_id,
+                ))
             })
             .map_err(|e| e.to_string())?;
 
