@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 use fastembed::{EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
 use serde::{Deserialize, Serialize};
+use rusqlite::{params, Connection, Params};
 
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     if a.len() != b.len() {
@@ -70,9 +71,9 @@ pub struct Meme {
     pub file_path: String,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-#[derive(PartialEq)]
+#[derive(Debug)]
 pub struct MemeStore {
+    conn: Connection,
     memes: Vec<Meme>,
 }
 
@@ -88,10 +89,17 @@ impl Meme {
 }
 
 impl MemeStore {
-    pub fn new() -> Self { Self::default() }
+    pub fn add(&mut self, meme: Meme) -> Result<(), String> {
 
-    pub fn add(&mut self, meme: Meme) {
+        let blob = self::embedding_to_blob(&meme.embeding);
+        self.conn.execute(
+            "INSERT INTO memes (id, title, file_path, embedding) VALUES (?, ?, ?, ?)",
+            params![meme.id, meme.title, meme.file_path, blob],
+        ).map_err(|e| {e.to_string()})?;
+
         self.memes.push(meme);
+
+        Ok(())
     }
 
     pub fn find_best(&self, query: &[f32]) -> Option<&Meme> {
@@ -99,14 +107,6 @@ impl MemeStore {
     }
 
     pub fn find_top_k(&self, query: &[f32], k: usize) -> Vec<(&Meme, f32)> { find_top_k(query, &self.memes, k) }
-
-    pub fn save_to_file(&self, filename: &str) -> Result<(), String> {
-        let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-
-        std::fs::write(filename, json).map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
 
     pub fn len(&self) -> usize {
         self.memes.len()
@@ -129,20 +129,27 @@ impl MemeStore {
         let idx = nanos % self.memes.len();
         Some(&self.memes[idx])
     }
+    // pub fn save_to_file(&self, filename: &str) -> Result<(), String> {
+    //     let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+    //
+    //     std::fs::write(filename, json).map_err(|e| e.to_string())?;
+    //
+    //     Ok(())
+    // }
 
-    pub fn load_from_file(filename: &str) -> Result<Self, String> {
-        let json = std::fs::read_to_string(filename).map_err(|e| e.to_string())?;
-
-        let save_result  = serde_json::from_str::<MemeStore>(&json).map_err(|e| e.to_string())?;
-
-        Ok(save_result)
-    }
+    // pub fn load_from_file(filename: &str) -> Result<Self, String> {
+    //     let json = std::fs::read_to_string(filename).map_err(|e| e.to_string())?;
+    //
+    //     let save_result  = serde_json::from_str::<MemeStore>(&json).map_err(|e| e.to_string())?;
+    //
+    //     Ok(save_result)
+    // }
 
     pub fn add_from_file(&mut self, id: u64, title: String, file_path: String, engine: &mut ClipEngine) -> Result<(), String> {
         let embed = engine.embed_image(&file_path).map_err(|e| e.to_string())?;
 
         let meme = Meme::new(id, title, embed, file_path);
-        self.add(meme);
+        self.add(meme)?;
 
         Ok(())
     }
@@ -161,6 +168,43 @@ impl MemeStore {
         let top_k = self.find_top_k(&embed, k);
 
         Ok(top_k)
+    }
+
+    pub fn open(db_connection: &str) -> Result<Self, String> {
+        let conn = Connection::open(db_connection).map_err(|e| e.to_string())?;
+        conn.execute("\
+        CREATE TABLE IF NOT EXISTS memes (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT, \
+            title TEXT NOT NULL, \
+            file_path TEXT NOT NULL, \
+            embedding BLOB NOT NULL\
+            )",
+                     []
+        ).map_err(|e| e.to_string())?;
+
+        let mut stmt = conn.prepare("SELECT * FROM memes").map_err(|e| e.to_string())?;
+
+        let meme_iter = stmt.query_map([], |row| {
+            let id: u64 = row.get(0)?;
+            let title: String = row.get(1)?;
+            let file_path: String = row.get(2)?;
+            let blob: Vec<u8> = row.get(3)?;
+            let embedding = blob_to_embedding(&blob);
+
+            Ok(Meme::new(id, title, embedding, file_path))
+        })
+            .map_err(|e| e.to_string())?;
+
+        let mut memes: Vec<Meme> = Vec::new();
+        for meme in meme_iter {
+            let item = meme.map_err(|e| e.to_string());
+            match item {
+                Ok(item) => memes.push(item),
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        drop(stmt);
+        Ok(Self { conn, memes })
     }
 }
 
@@ -193,4 +237,16 @@ impl ClipEngine {
         let first_embed_vec = embed_vec.pop().unwrap();
         Ok(first_embed_vec)
     }
+}
+
+pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
+    embedding
+        .iter()
+        .flat_map(|&val| val.to_le_bytes())
+        .collect()
+}
+pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
+    blob.chunks_exact(4)
+        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
+        .collect()
 }

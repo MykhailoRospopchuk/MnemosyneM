@@ -7,11 +7,12 @@ use teloxide::types::{InputFile, InputMedia, InputMediaPhoto, Message};
 use teloxide::prelude::*;
 use teloxide::utils::command::{BotCommands};
 use MnemosyneM::{score_calibration, ClipEngine, MemeStore, Meme};
+use rusqlite::{Connection, params};
 
 const TOP_K: usize = 3;
 
 pub struct AppConfig{
-    pub json_storage: String,
+    pub db_path: String,
     pub top_k: usize,
 }
 
@@ -33,7 +34,7 @@ static CONFIG: OnceLock<AppConfig> = OnceLock::new();
 pub fn config() -> &'static AppConfig {
     CONFIG.get_or_init(|| {
         AppConfig{
-            json_storage: env::var("JSON_STORAGE").expect("Couldn't read JSON_STORAGE"),
+            db_path: env::var("DB_PATH").expect("Couldn't read DB_PATH"),
             top_k: env::var("TOP_K").expect("Couldn't read TOP_K").parse::<usize>().unwrap_or(TOP_K),
         }
     })
@@ -64,7 +65,7 @@ async fn main() {
     println!("Loading storage and models...");
 
     let engine = ClipEngine::new().expect("Failed to create clip engine");
-    let store = MemeStore::load_from_file(&app_config.json_storage).unwrap_or_else(|_| MemeStore::new());
+    let store = MemeStore::open(&app_config.db_path).expect("Failed to open database");
 
     let state = Arc::new(AppState {
         meme_store: Mutex::new(store),
@@ -104,7 +105,6 @@ async fn main() {
 
                     match meme_store.add_from_file(id, title.clone(), file_path, &mut engine) {
                         Ok(()) => {
-                            let _ = meme_store.save_to_file(&app_config.json_storage);
                             bot.send_message(msg.chat.id, format!("[V] Your meme has been confiscated... {}", title)).await?;
                         }
                         Err(e) => {
