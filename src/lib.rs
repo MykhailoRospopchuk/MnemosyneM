@@ -287,8 +287,9 @@ impl MemeStore {
 
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
-        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::Qwen))
-            .map_err(|e| e.to_string())?;
+        let text_model =
+            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::NomicEmbedTextV15))
+                .map_err(|e| e.to_string())?;
         let image_model = ImageEmbedding::try_new(ImageInitOptions::new(
             ImageEmbeddingModel::NomicEmbedVisionV15,
         ))
