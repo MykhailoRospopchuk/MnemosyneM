@@ -55,7 +55,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
         }
     }
 
-    top_k.retain(|(_, value)| value > &0.19);
+    top_k.retain(|(_, value)| value > &0.05);
     top_k.sort_by(|b, a| a.1.total_cmp(&b.1));
 
     top_k.truncate(k);
@@ -63,7 +63,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
 }
 
 pub fn score_calibration(raw_score: f32) -> f32 {
-    ((raw_score - 0.15) / (0.35 - 0.15) * 100.0).clamp(0.0, 100.0)
+    ((raw_score - 0.05) / (0.35 - 0.05) * 100.0).clamp(0.0, 100.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -285,11 +285,13 @@ impl MemeStore {
 
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
-        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::ClipVitB32))
-            .map_err(|e| e.to_string())?;
-        let image_model =
-            ImageEmbedding::try_new(ImageInitOptions::new(ImageEmbeddingModel::ClipVitB32))
+        let text_model =
+            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::Qwen))
                 .map_err(|e| e.to_string())?;
+        let image_model = ImageEmbedding::try_new(ImageInitOptions::new(
+            ImageEmbeddingModel::NomicEmbedVisionV15,
+        ))
+        .map_err(|e| e.to_string())?;
 
         Ok(Self {
             text_model,
@@ -298,9 +300,10 @@ impl ClipEngine {
     }
 
     pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let format_query = format!("search_query: {}", text);
         let mut embed_vec = self
             .text_model
-            .embed(vec![text], None)
+            .embed(vec![format_query], None)
             .map_err(|e| e.to_string())?;
 
         if embed_vec.is_empty() {
