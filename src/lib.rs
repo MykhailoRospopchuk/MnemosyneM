@@ -1,6 +1,7 @@
+use candle_core::{DType, Device};
 use fastembed::{
-    EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, TextEmbedding,
-    TextInitOptions,
+    EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, Qwen3VLEmbedding,
+    TextEmbedding, TextInitOptions,
 };
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
@@ -84,6 +85,7 @@ pub struct MemeStore {
 pub struct ClipEngine {
     text_model: TextEmbedding,
     image_model: ImageEmbedding,
+    vl_model: Qwen3VLEmbedding,
 }
 
 impl Meme {
@@ -285,25 +287,30 @@ impl MemeStore {
 
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
-        let text_model =
-            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::Qwen))
-                .map_err(|e| e.to_string())?;
+        let text_model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::Qwen))
+            .map_err(|e| e.to_string())?;
         let image_model = ImageEmbedding::try_new(ImageInitOptions::new(
             ImageEmbeddingModel::NomicEmbedVisionV15,
         ))
         .map_err(|e| e.to_string())?;
 
+        let device = Device::Cpu;
+        let vl_model =
+            Qwen3VLEmbedding::from_hf("Qwen/Qwen3-VL-Embedding-2B", &device, DType::F32, 512)
+                .map_err(|e| e.to_string())?;
+
         Ok(Self {
             text_model,
             image_model,
+            vl_model,
         })
     }
 
     pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
         let format_query = format!("search_query: {}", text);
         let mut embed_vec = self
-            .text_model
-            .embed(vec![format_query], None)
+            .vl_model
+            .embed_texts(&[format_query])
             .map_err(|e| e.to_string())?;
 
         if embed_vec.is_empty() {
@@ -317,8 +324,8 @@ impl ClipEngine {
 
     pub fn embed_image(&mut self, path: &str) -> Result<Vec<f32>, String> {
         let mut embed_vec = self
-            .image_model
-            .embed(vec![path], None)
+            .vl_model
+            .embed_images(&[path])
             .map_err(|e| e.to_string())?;
         if embed_vec.is_empty() {
             return Err("embed image not found".to_string());
@@ -330,8 +337,8 @@ impl ClipEngine {
 
     pub fn embed_image_from_bytes(&mut self, bytes: &Vec<u8>) -> Result<Vec<f32>, String> {
         let mut embed_vec = self
-            .image_model
-            .embed_bytes(&[bytes], None)
+            .vl_model
+            .embed_image_bytes(&[bytes.as_slice()])
             .map_err(|e| e.to_string())?;
 
         embed_vec
