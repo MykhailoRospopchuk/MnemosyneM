@@ -1,8 +1,4 @@
-use candle_core::{DType, Device};
-use fastembed::{
-    EmbeddingModel, ImageEmbedding, ImageEmbeddingModel, ImageInitOptions, Qwen3VLEmbedding,
-    TextEmbedding, TextInitOptions,
-};
+use fastembed::{EmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -84,8 +80,6 @@ pub struct MemeStore {
 
 pub struct ClipEngine {
     text_model: TextEmbedding,
-    image_model: ImageEmbedding,
-    vl_model: Qwen3VLEmbedding,
 }
 
 impl Meme {
@@ -159,49 +153,18 @@ impl MemeStore {
         let idx = nanos % self.memes.len();
         Some(&self.memes[idx])
     }
-    // pub fn save_to_file(&self, filename: &str) -> Result<(), String> {
-    //     let json = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-    //
-    //     std::fs::write(filename, json).map_err(|e| e.to_string())?;
-    //
-    //     Ok(())
-    // }
 
-    // pub fn load_from_file(filename: &str) -> Result<Self, String> {
-    //     let json = std::fs::read_to_string(filename).map_err(|e| e.to_string())?;
-    //
-    //     let save_result  = serde_json::from_str::<MemeStore>(&json).map_err(|e| e.to_string())?;
-    //
-    //     Ok(save_result)
-    // }
-
-    pub fn add_from_file(
+    pub fn add_from_descriptions(
         &mut self,
         id: u64,
         title: String,
         file_tg_id: String,
         file_tg_unique_id: String,
-        engine: &mut ClipEngine,
-    ) -> Result<(), String> {
-        let embed = engine.embed_image(&file_tg_id).map_err(|e| e.to_string())?;
-
-        let meme = Meme::new(id, title, embed, file_tg_id, file_tg_unique_id);
-        self.add(meme)?;
-
-        Ok(())
-    }
-
-    pub fn add_from_bytes(
-        &mut self,
-        id: u64,
-        title: String,
-        file_tg_id: String,
-        file_tg_unique_id: String,
-        image_bytes: &[u8],
+        descriptions: String,
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
         let embed = engine
-            .embed_image_from_bytes(&image_bytes.to_vec())
+            .embed_passage(&descriptions)
             .map_err(|e| e.to_string())?;
 
         let meme = Meme::new(id, title, embed, file_tg_id, file_tg_unique_id);
@@ -214,7 +177,7 @@ impl MemeStore {
         query_text: &str,
         engine: &mut ClipEngine,
     ) -> Result<Option<&'a Meme>, String> {
-        let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
+        let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
 
         let best_match = self.find_best(&embed);
 
@@ -227,7 +190,7 @@ impl MemeStore {
         engine: &mut ClipEngine,
         k: usize,
     ) -> Result<Vec<(&'a Meme, f32)>, String> {
-        let embed = engine.embed_text(query_text).map_err(|e| e.to_string())?;
+        let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
 
         let top_k = self.find_top_k(&embed, k);
 
@@ -288,63 +251,34 @@ impl MemeStore {
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
         let text_model =
-            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::NomicEmbedTextV15))
-                .map_err(|e| e.to_string())?;
-        let image_model = ImageEmbedding::try_new(ImageInitOptions::new(
-            ImageEmbeddingModel::NomicEmbedVisionV15,
-        ))
-        .map_err(|e| e.to_string())?;
-
-        let device = Device::Cpu;
-        let vl_model =
-            Qwen3VLEmbedding::from_hf("Qwen/Qwen3-VL-Embedding-2B", &device, DType::F32, 512)
+            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::MultilingualE5Base))
                 .map_err(|e| e.to_string())?;
 
-        Ok(Self {
-            text_model,
-            image_model,
-            vl_model,
-        })
+        Ok(Self { text_model })
     }
 
-    pub fn embed_text(&mut self, text: &str) -> Result<Vec<f32>, String> {
-        let format_query = format!("search_query: {}", text);
+    pub fn embed_passage(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let format_passage = format!("passage: {}", text);
         let mut embed_vec = self
-            .vl_model
-            .embed_texts(&[format_query])
-            .map_err(|e| e.to_string())?;
-
-        if embed_vec.is_empty() {
-            return Err("embed text is empty".to_string());
-        }
-
-        let first_embed_vec = embed_vec.pop().unwrap();
-
-        Ok(first_embed_vec)
-    }
-
-    pub fn embed_image(&mut self, path: &str) -> Result<Vec<f32>, String> {
-        let mut embed_vec = self
-            .vl_model
-            .embed_images(&[path])
-            .map_err(|e| e.to_string())?;
-        if embed_vec.is_empty() {
-            return Err("embed image not found".to_string());
-        }
-
-        let first_embed_vec = embed_vec.pop().unwrap();
-        Ok(first_embed_vec)
-    }
-
-    pub fn embed_image_from_bytes(&mut self, bytes: &Vec<u8>) -> Result<Vec<f32>, String> {
-        let mut embed_vec = self
-            .vl_model
-            .embed_image_bytes(&[bytes.as_slice()])
+            .text_model
+            .embed(vec![format_passage], None)
             .map_err(|e| e.to_string())?;
 
         embed_vec
             .pop()
-            .ok_or_else(|| "embed image not found".to_string())
+            .ok_or_else(|| "embeding passage is empty".to_string())
+    }
+
+    pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, String> {
+        let format_query = format!("query: {}", text);
+        let mut embed_vec = self
+            .text_model
+            .embed(vec![format_query], None)
+            .map_err(|e| e.to_string())?;
+
+        embed_vec
+            .pop()
+            .ok_or_else(|| "embeding query is empty".to_string())
     }
 }
 

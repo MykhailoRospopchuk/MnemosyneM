@@ -7,12 +7,14 @@ use teloxide::prelude::*;
 use teloxide::types::{FileId, InputFile, InputMedia, InputMediaPhoto, Message};
 use teloxide::utils::command::BotCommands;
 use tokio::sync::Mutex;
+mod vlm;
 
 const TOP_K: usize = 3;
 
 pub struct AppConfig {
     pub db_path: String,
     pub top_k: usize,
+    pub gemini_api_key: String,
 }
 
 #[derive(BotCommands, Clone)]
@@ -40,6 +42,7 @@ pub fn config() -> &'static AppConfig {
             .expect("Couldn't read TOP_K")
             .parse::<usize>()
             .unwrap_or(TOP_K),
+        gemini_api_key: env::var("GEMINI_API_KEY").expect("Couldn't read GEMINI_API_KEY"),
     })
 }
 
@@ -61,6 +64,11 @@ async fn main() {
     match env::var("DB_PATH") {
         Ok(url) => println!("DB_PATH: {}", url),
         Err(e) => eprintln!("Couldn't read DB_PATH: {}", e),
+    }
+
+    match env::var("GEMINI_API_KEY") {
+        Ok(url) => println!("GEMINI_API_KEY: {}", url),
+        Err(e) => eprintln!("Couldn't read GEMINI_API_KEY: {}", e),
     }
 
     let app_config = crate::config();
@@ -88,7 +96,8 @@ async fn main() {
         async move {
             if let Some(photos) = msg.photo() {
                 if let Some(photo) = photos.last() {
-                    bot.send_message(msg.chat.id, "Your meme has been confiscated...")
+                    // 1. Prepare processing
+                    bot.send_message(msg.chat.id, "Your meme will been confiscated...")
                         .await?;
 
                     let file = bot.get_file(photo.file.id.clone()).await?;
@@ -109,15 +118,32 @@ async fn main() {
                     let telegram_file_id = photo.file.id.0.clone();
                     let telegram_file_unique_id = photo.file.unique_id.0.clone();
 
+                    let descriptions =
+                        match vlm::dewscribe_meme(&image_butes, &app_config.gemini_api_key).await {
+                            Ok(desc) => desc,
+                            Err(e) => {
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!("[X] AI не зміг розпізнати мем: {}", e),
+                                )
+                                .await?;
+                                return Ok(());
+                            }
+                        };
+
+                    print!("AI description of meme: {}", descriptions);
+
+                    let full_title = format!("{} | {}", title, descriptions);
+
                     let mut engine = state.engine.lock().await;
                     let mut meme_store = state.meme_store.lock().await;
 
-                    match meme_store.add_from_bytes(
+                    match meme_store.add_from_descriptions(
                         id,
-                        title.clone(),
+                        full_title.clone(),
                         telegram_file_id,
                         telegram_file_unique_id,
-                        &image_butes,
+                        descriptions,
                         &mut engine,
                     ) {
                         Ok(()) => {
