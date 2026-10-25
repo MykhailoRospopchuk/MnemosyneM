@@ -1,4 +1,4 @@
-use MnemosyneM::{ClipEngine, Meme, MemeStore, score_calibration};
+use m_nemosyne_m::{ClipEngine, Meme, MemeStore, score_calibration};
 use std::env;
 use std::sync::{Arc, OnceLock};
 use teloxide::Bot;

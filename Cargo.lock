@@ -3,20 +3,6 @@
 version = 4
 
 [[package]]
-name = "MnemosyneM"
-version = "0.1.0"
-dependencies = [
- "candle-core",
- "dotenvy",
- "fastembed",
- "rusqlite",
- "serde",
- "serde_json",
- "teloxide",
- "tokio",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1947,6 +1933,20 @@ name = "lzma-rust2"
 version = "0.15.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e20f57f9918e5bd7bc58c22cdd70a6afc7375d4dd9683af5f2b34bd3d2bba619"
+
+[[package]]
+name = "m_nemosyne_m"
+version = "0.1.0"
+dependencies = [
+ "candle-core",
+ "dotenvy",
+ "fastembed",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "teloxide",
+ "tokio",
+]
 
 [[package]]
 name = "macro_rules_attribute"
