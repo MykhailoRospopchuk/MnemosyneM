@@ -1,4 +1,4 @@
-use fastembed::{EmbeddingModel, ImageInitOptions, TextEmbedding, TextInitOptions};
+use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
@@ -60,7 +60,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
 }
 
 pub fn score_calibration(raw_score: f32) -> f32 {
-    ((raw_score - 0.05) / (0.35 - 0.05) * 100.0).clamp(0.0, 100.0)
+    ((raw_score) * 100.0).clamp(0.0, 100.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

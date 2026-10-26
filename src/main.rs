@@ -67,7 +67,7 @@ async fn main() {
     }
 
     match env::var("GEMINI_API_KEY") {
-        Ok(url) => println!("GEMINI_API_KEY: {}", url),
+        Ok(_) => println!("GEMINI_API_KEY: [CONFIGURED]"),
         Err(e) => eprintln!("Couldn't read GEMINI_API_KEY: {}", e),
     }
 
@@ -97,12 +97,20 @@ async fn main() {
             if let Some(photos) = msg.photo() {
                 if let Some(photo) = photos.last() {
                     // 1. Prepare processing
-                    bot.send_message(msg.chat.id, "Your meme will been confiscated...")
+                    println!("\n--- [NEW MEME] ---");
+                    println!("[1/5] Received photo from user, Downloading from Ttltgram...");
+
+                    bot.send_message(msg.chat.id, "Your meme will been confiscated by AI...")
                         .await?;
 
                     let file = bot.get_file(photo.file.id.clone()).await?;
                     let mut image_butes: Vec<u8> = Vec::new();
                     bot.download_file(&file.path, &mut image_butes).await?;
+
+                    println!(
+                        "[2/5] Photo uploaded ({} byte). Send toв Gemini...",
+                        image_butes.len()
+                    );
 
                     // 2. detect name and ID
                     let title = msg
@@ -119,21 +127,24 @@ async fn main() {
                     let telegram_file_unique_id = photo.file.unique_id.0.clone();
 
                     let descriptions =
-                        match vlm::dewscribe_meme(&image_butes, &app_config.gemini_api_key).await {
+                        match vlm::describe_meme(&image_butes, &app_config.gemini_api_key).await {
                             Ok(desc) => desc,
                             Err(e) => {
+                                eprintln!("[ERROR] Something go wrong VLM: {}", e);
                                 bot.send_message(
                                     msg.chat.id,
-                                    format!("[X] AI не зміг розпізнати мем: {}", e),
+                                    format!("[X] AI cant recognize meme: {}", e),
                                 )
                                 .await?;
                                 return Ok(());
                             }
                         };
 
-                    print!("AI description of meme: {}", descriptions);
+                    println!("[3/5] AI description:\n{}", descriptions);
 
                     let full_title = format!("{} | {}", title, descriptions);
+
+                    println!("[4/5] Vec calculating by MultilingualE5Base...");
 
                     let mut engine = state.engine.lock().await;
                     let mut meme_store = state.meme_store.lock().await;
@@ -147,6 +158,7 @@ async fn main() {
                         &mut engine,
                     ) {
                         Ok(()) => {
+                            println!("[5/5] Sucessfully saved in SQLite!");
                             bot.send_message(
                                 msg.chat.id,
                                 format!("[V] Your meme has been confiscated... {}", title),
@@ -154,6 +166,7 @@ async fn main() {
                             .await?;
                         }
                         Err(e) => {
+                            eprintln!("[ERROR]BD error SQLite: {}", e);
                             bot.send_message(
                                 msg.chat.id,
                                 format!("[X] Walter we lost it... {}", e),
@@ -192,11 +205,13 @@ async fn main() {
                             let meme_store = state.meme_store.lock().await;
                             if let Some(meme) = meme_store.random_meme() {
                                 if !meme.file_tg_id.is_empty() {
+                                    let short_title: String =
+                                        meme.title.chars().take(200).collect();
                                     bot.send_photo(
                                         msg.chat.id,
                                         InputFile::file_id(FileId(meme.file_tg_id.clone())),
                                     )
-                                    .caption(format!("🎲 Випадковий мем: {}", meme.title))
+                                    .caption(format!("🎲 Random meme: {}", short_title))
                                     .await?;
                                 } else {
                                     bot.send_message(
@@ -226,15 +241,34 @@ async fn main() {
 
                 bot.send_message(msg.chat.id, "Process search...").await?;
 
+                println!("\n---- [SEARCH] ----");
+                println!("[1/4] User query: [{}]", text);
+
                 let mut engine = state.engine.lock().await;
                 let meme_store = state.meme_store.lock().await;
 
+                println!(
+                    "[2/4] Searching top-{} in DB ({} memes total)...",
+                    app_config.top_k,
+                    meme_store.len()
+                );
+
                 match meme_store.search_top_k(text, &mut engine, app_config.top_k) {
                     Ok(results) if results.is_empty() => {
+                        println!("[3/4] No memes found matching query.");
                         bot.send_message(msg.chat.id, "There is nothing here...")
                             .await?;
                     }
                     Ok(results) => {
+                        println!("[3/4] Found {} matching meme(s):", results.len());
+
+                        for (meme, score) in &results {
+                            println!(
+                                "  -> ID: [{}] | Raw Score: [{:.4}] | Title [{:.50}]...",
+                                meme.id, score, meme.title
+                            )
+                        }
+
                         let valid_memes: Vec<(&Meme, f32)> = results
                             .into_iter()
                             .filter(|(meme, _)| !meme.file_tg_id.is_empty())
@@ -246,29 +280,51 @@ async fn main() {
                         } else if valid_memes.len() == 1 {
                             let (single_meme, single_score) = valid_memes[0];
 
-                            bot.send_photo(
-                                msg.chat.id,
-                                InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
-                            )
-                            .caption(format!(
+                            let short_title: String = single_meme.title.chars().take(200).collect();
+
+                            let caption = format!(
                                 "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",
-                                single_meme.title,
+                                short_title,
                                 score_calibration(single_score),
                                 single_score
-                            ))
-                            .await?;
+                            );
+
+                            println!("[4/4] Sending 1 photo to Telegram...");
+
+                            if let Err(e) = bot
+                                .send_photo(
+                                    msg.chat.id,
+                                    InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
+                                )
+                                .caption(caption)
+                                .await
+                            {
+                                eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!("Failed to send photo: {}", e),
+                                )
+                                .await?;
+                            };
                         } else {
+                            println!(
+                                "[4/4] Sending media group album with {} photos to Telegram...",
+                                valid_memes.len()
+                            );
+
                             let media_group: Vec<InputMedia> =
                                 valid_memes
                                     .iter()
                                     .map(|(meme, score)| {
+                                        let short_title: String =
+                                            meme.title.chars().take(200).collect();
                                         InputMedia::Photo(
                                             InputMediaPhoto::new(InputFile::file_id(FileId(
                                                 meme.file_tg_id.clone(),
                                             )))
                                             .caption(format!(
                                                 "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",
-                                                meme.title,
+                                                short_title,
                                                 score_calibration(*score),
                                                 score
                                             )),
@@ -276,10 +332,17 @@ async fn main() {
                                     })
                                     .collect();
 
-                            bot.send_media_group(msg.chat.id, media_group).await?;
+                            if let Err(e) = bot.send_media_group(msg.chat.id, media_group).await {
+                                eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
+                                let _ = bot.send_message(
+                                    msg.chat.id,
+                                    format!("failed to send media group: {}", e),
+                                );
+                            }
                         }
                     }
                     Err(e) => {
+                        eprintln!("[ERROR] Search error: {}", e);
                         bot.send_message(msg.chat.id, format!("Dead inside: {}", e))
                             .await?;
                     }
