@@ -96,6 +96,28 @@ async fn main() {
         async move {
             if let Some(photos) = msg.photo() {
                 if let Some(photo) = photos.last() {
+                    let telegram_file_id = photo.file.id.0.clone();
+                    let telegram_file_unique_id = photo.file.unique_id.0.clone();
+
+                    let already_exist = {
+                        let meme_store = state.meme_store.lock().await;
+                        meme_store.conains_meme(&telegram_file_unique_id)
+                    };
+
+                    if already_exist {
+                        println!("\n--- [DUPLICATE MEME] ---");
+                        println!(
+                            "[INFO] Meme with unique ID [{}] already exists in DB",
+                            telegram_file_unique_id
+                        );
+                        bot.send_message(
+                            msg.chat.id,
+                            "I already have this meme in my database! 🧠",
+                        )
+                        .await?;
+                        return Ok(());
+                    }
+
                     // 1. Prepare processing
                     println!("\n--- [NEW MEME] ---");
                     println!("[1/5] Received photo from user, Downloading from Ttltgram...");
@@ -122,9 +144,6 @@ async fn main() {
                         .duration_since(std::time::UNIX_EPOCH)
                         .unwrap()
                         .as_secs();
-
-                    let telegram_file_id = photo.file.id.0.clone();
-                    let telegram_file_unique_id = photo.file.unique_id.0.clone();
 
                     let descriptions =
                         match vlm::describe_meme(&image_butes, &app_config.gemini_api_key).await {

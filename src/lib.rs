@@ -60,7 +60,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
 }
 
 pub fn score_calibration(raw_score: f32) -> f32 {
-    ((raw_score) * 100.0).clamp(0.0, 100.0)
+    ((raw_score - 0.70) / (0.85 - 0.70) * 100.0).clamp(0.0, 100.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -122,6 +122,23 @@ impl MemeStore {
         self.memes.push(meme);
 
         Ok(())
+    }
+
+    pub fn check_by_tg_unique_id(&mut self, unique_tg_id: &str) -> Option<bool> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT 1 FROM memes m WHERE m.file_tg_unique_id = ?")
+            .ok()?;
+
+        let meme_exist = stmt.exists(params![unique_tg_id]).ok()?;
+
+        Some(meme_exist)
+    }
+
+    pub fn conains_meme(&self, unique_tg_id: &str) -> bool {
+        self.memes
+            .iter()
+            .any(|meme| meme.file_tg_unique_id == unique_tg_id)
     }
 
     pub fn find_best(&self, query: &[f32]) -> Option<&Meme> {
