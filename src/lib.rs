@@ -60,7 +60,7 @@ pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Me
 }
 
 pub fn score_calibration(raw_score: f32) -> f32 {
-    ((raw_score - 0.70) / (0.85 - 0.70) * 100.0).clamp(0.0, 100.0)
+    ((raw_score - 0.75) / (0.85 - 0.75) * 100.0).clamp(0.0, 100.0)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
