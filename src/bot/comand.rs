@@ -67,13 +67,12 @@ pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Mess
     let meme_store = state.meme_store.lock().await;
     if let Some(meme) = meme_store.random_meme() {
         if !meme.file_tg_id.is_empty() {
-            let short_title: String = meme.title.chars().take(200).collect();
             message = bot
                 .send_photo(
                     msg.chat.id,
                     InputFile::file_id(FileId(meme.file_tg_id.clone())),
                 )
-                .caption(format!("🎲 Random meme: {}", short_title))
+                .caption(format!("🎲 Random meme"))
                 .await?;
         } else {
             message = bot

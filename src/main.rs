@@ -3,9 +3,11 @@ mod config;
 mod db;
 mod engine;
 mod vlm;
+mod worker;
 
 use std::sync::Arc;
 
+use teloxide::Bot;
 use tokio::sync::Mutex;
 
 struct AppState {
@@ -30,9 +32,20 @@ async fn main() {
         engine: Mutex::new(engine),
     });
 
+    let bot = Bot::from_env();
+
+    let (sender, receiver) = tokio::sync::mpsc::channel(100);
+    worker::start_worker(
+        receiver,
+        sender.clone(),
+        Arc::clone(&state),
+        bot.clone(),
+        app_config,
+    );
+
     println!("Let's get it started");
 
-    bot::run_bot(state, app_config).await;
+    bot::run_bot(bot, state, app_config, sender).await;
 
     println!("DONE!");
 }
