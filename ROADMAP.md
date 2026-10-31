@@ -301,7 +301,7 @@ Meme ID: 1793041234
   - [ ] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
   - [ ] Multi-tenancy inline cache control (`is_personal = true`).
   - [ ] BotFather inline configuration (`/setinline`).
-  - [ ] MPSC background queue worker with 4-second pacing (15 RPM guard).
+  - [x] MPSC background queue worker with 4-second pacing (15 RPM guard).
   - [ ] SQLite schema update (`user_id`, `is_public`, `status`).
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private`).
   - [ ] Search scope selection (`all`, `public_only`, `private_only`).
