@@ -251,7 +251,7 @@ Meme ID: 1793041234
   - [x] Multi-item search results sent as Telegram media group albums.
   - [x] Fast in-memory deduplication check via `telegram_file_unique_id`.
 - [ ] **v0.2: UX & Queue & Privacy**
-  - [ ] Concise Telegram response format (remove Gemini text dumps).
+  - [x] Concise Telegram response format (remove Gemini text dumps).
   - [ ] MPSC background queue worker with 4-second pacing (15 RPM guard).
   - [ ] SQLite schema update (`user_id`, `is_public`, `status`).
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private`).

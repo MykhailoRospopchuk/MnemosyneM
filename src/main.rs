@@ -122,9 +122,6 @@ async fn main() {
                     println!("\n--- [NEW MEME] ---");
                     println!("[1/5] Received photo from user, Downloading from Ttltgram...");
 
-                    bot.send_message(msg.chat.id, "Your meme will been confiscated by AI...")
-                        .await?;
-
                     let file = bot.get_file(photo.file.id.clone()).await?;
                     let mut image_butes: Vec<u8> = Vec::new();
                     bot.download_file(&file.path, &mut image_butes).await?;
@@ -180,12 +177,12 @@ async fn main() {
                             println!("[5/5] Sucessfully saved in SQLite!");
                             bot.send_message(
                                 msg.chat.id,
-                                format!("[V] Your meme has been confiscated... {}", title),
+                                format!("[V] 📥 Your meme has been confiscated... {}", title),
                             )
                             .await?;
                         }
                         Err(e) => {
-                            eprintln!("[ERROR]BD error SQLite: {}", e);
+                            eprintln!("[ERROR] DB error SQLite: {}", e);
                             bot.send_message(
                                 msg.chat.id,
                                 format!("[X] Walter we lost it... {}", e),
@@ -299,15 +296,6 @@ async fn main() {
                         } else if valid_memes.len() == 1 {
                             let (single_meme, single_score) = valid_memes[0];
 
-                            let short_title: String = single_meme.title.chars().take(200).collect();
-
-                            let caption = format!(
-                                "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",
-                                short_title,
-                                score_calibration(single_score),
-                                single_score
-                            );
-
                             println!("[4/4] Sending 1 photo to Telegram...");
 
                             if let Err(e) = bot
@@ -315,7 +303,10 @@ async fn main() {
                                     msg.chat.id,
                                     InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
                                 )
-                                .caption(caption)
+                                .caption(format!(
+                                    "📊 Match: {:.3} %",
+                                    score_calibration(single_score)
+                                ))
                                 .await
                             {
                                 eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
@@ -331,25 +322,19 @@ async fn main() {
                                 valid_memes.len()
                             );
 
-                            let media_group: Vec<InputMedia> =
-                                valid_memes
-                                    .iter()
-                                    .map(|(meme, score)| {
-                                        let short_title: String =
-                                            meme.title.chars().take(200).collect();
-                                        InputMedia::Photo(
-                                            InputMediaPhoto::new(InputFile::file_id(FileId(
-                                                meme.file_tg_id.clone(),
-                                            )))
-                                            .caption(format!(
-                                                "🎯 {} (Score: {:.3} %) - (Raw Score: {:.3})",
-                                                short_title,
-                                                score_calibration(*score),
-                                                score
-                                            )),
-                                        )
-                                    })
-                                    .collect();
+                            let media_group: Vec<InputMedia> = valid_memes
+                                .iter()
+                                .map(|(meme, score)| {
+                                    InputMedia::Photo(
+                                        InputMediaPhoto::new(InputFile::file_id(FileId(
+                                            meme.file_tg_id.clone(),
+                                        )))
+                                        .caption(
+                                            format!("📊 Match: {:.3} %", score_calibration(*score)),
+                                        ),
+                                    )
+                                })
+                                .collect();
 
                             if let Err(e) = bot.send_media_group(msg.chat.id, media_group).await {
                                 eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
