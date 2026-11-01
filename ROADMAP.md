@@ -306,8 +306,8 @@ Meme ID: 1793041234
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private`).
   - [ ] Search scope selection (`all`, `public_only`, `private_only`).
 - [ ] **v0.3: Moderation & Admin**
-  - [ ] Parse `safetyRatings` from Gemini responses.
-  - [ ] Automated quarantine for explicit content / NSFW.
+  - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
+  - [x] Automated quarantine / rejection for explicit content / NSFW.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**
   - [ ] Criterion micro-benchmarks suite for 768-dim vector cosine similarity.
