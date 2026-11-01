@@ -52,37 +52,49 @@ pub fn start_worker(
                 continue;
             }
 
-            let descriptions =
-                match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key).await {
-                    Ok(desc) => desc,
-                    Err(e) => {
-                        eprintln!("[WORKER]-[ERROR] Something go wrong VLM: {}", e);
-                        if job.retry_count < 2 {
-                            let mut retried_job = job;
-                            retried_job.retry_count += 1;
-                            println!(
-                                "[WORKER] Retrying meme {} (attempt {}/2)...",
-                                retried_job.file_unique_id, retried_job.retry_count
-                            );
-                            // Повертаємо в чергу
-                            let _ = sender.send(retried_job).await;
-                        } else {
-                            // Спроби вичерпано — сповіщаємо юзера тільки зараз!
-                            eprintln!(
-                                "[WORKER] Max retries reached for {}. Dropping task.",
-                                job.file_unique_id
-                            );
-                            let _ = bot
-                                .send_message(
-                                    job.chat_id,
-                                    format!("[X] AI could not analyze meme: {}", e),
-                                )
-                                .await;
-                        }
-                        tokio::time::sleep(Duration::from_secs(4)).await;
-                        continue;
+            let descriptions = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key)
+                .await
+            {
+                Ok(desc) => desc,
+                Err(vlm::VlmError::InappropriateContent(reason)) => {
+                    eprintln!(
+                        "[WORKER SECURITY ALERT] Inappropriate meme rejected: {}",
+                        reason
+                    );
+                    let _ = bot.send_message(
+                            job.chat_id,
+                            format!("⛔ [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!", reason),
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    continue;
+                }
+                Err(vlm::VlmError::Transient(e)) => {
+                    eprintln!("[WORKER]-[ERROR] Something go wrong VLM: {}", e);
+                    if job.retry_count < 2 {
+                        let mut retried_job = job;
+                        retried_job.retry_count += 1;
+                        println!(
+                            "[WORKER] Retrying meme {} (attempt {}/2)...",
+                            retried_job.file_unique_id, retried_job.retry_count
+                        );
+                        let _ = sender.send(retried_job).await;
+                    } else {
+                        eprintln!(
+                            "[WORKER] Max retries reached for {}. Dropping task.",
+                            job.file_unique_id
+                        );
+                        let _ = bot
+                            .send_message(
+                                job.chat_id,
+                                format!("[X] AI could not analyze meme: {}", e),
+                            )
+                            .await;
                     }
-                };
+                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    continue;
+                }
+            };
 
             let id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
