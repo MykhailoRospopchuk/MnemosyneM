@@ -28,8 +28,11 @@ pub async fn handle_photo(
             "[INFO] Meme with unique ID [{}] already exists in DB",
             telegram_file_unique_id
         );
-        bot.send_message(msg.chat.id, "I already have this meme in my database! 🧠")
-            .await?;
+        bot.send_message(
+            msg.chat.id,
+            "[Ї] I already have this meme in my database! 🧠",
+        )
+        .await?;
         return Ok(());
     }
 
@@ -51,8 +54,6 @@ pub async fn handle_photo(
         return Ok(());
     }
 
-    bot.send_message(msg.chat.id, "📥 Added to processing queue...")
-        .await?;
     Ok(())
 }
 

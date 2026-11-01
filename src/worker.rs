@@ -32,7 +32,11 @@ pub fn start_worker(
 
         while let Some(job) = receiver.recv().await {
             println!("[--- QUEUE WORKER ---]");
-            println!("[WORKER] Processing meme: {}", job.file_unique_id);
+            println!(
+                "[WORKER] Processing meme: {} | Total Queue: [{}]",
+                job.file_unique_id,
+                receiver.len()
+            );
 
             let file = match bot.get_file(FileId(job.file_id.clone())).await {
                 Ok(f) => f,
@@ -103,7 +107,7 @@ pub fn start_worker(
                     let _ = bot
                         .send_message(
                             job.chat_id,
-                            format!("[V] 📥 Your meme has been confiscated..."),
+                            format!("[V] Your meme has been confiscated..."),
                         )
                         .await;
                 }

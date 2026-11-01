@@ -56,7 +56,17 @@ impl MemeStore {
             )
             .map_err(|e| e.to_string())?;
 
-        self.memes.push(meme);
+        if let Some(item) = self
+            .memes
+            .iter_mut()
+            .find(|x| x.file_tg_unique_id == meme.file_tg_unique_id)
+        {
+            item.title = meme.title;
+            item.embeding = meme.embeding;
+            item.file_tg_id = meme.file_tg_id;
+        } else {
+            self.memes.push(meme);
+        }
 
         Ok(())
     }
