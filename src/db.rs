@@ -11,6 +11,8 @@ pub struct Meme {
     pub embeding: Vec<f32>,
     pub file_tg_id: String,
     pub file_tg_unique_id: String,
+    pub user_id: i64,
+    pub is_public: bool,
 }
 
 impl Meme {
@@ -20,6 +22,8 @@ impl Meme {
         embeding: Vec<f32>,
         file_tg_id: String,
         file_tg_unique_id: String,
+        user_id: i64,
+        is_public: bool,
     ) -> Self {
         Self {
             id,
@@ -27,6 +31,8 @@ impl Meme {
             embeding,
             file_tg_id,
             file_tg_unique_id,
+            user_id,
+            is_public,
         }
     }
 }
@@ -42,8 +48,8 @@ impl MemeStore {
         let blob = self::embedding_to_blob(&meme.embeding);
         self.conn
             .execute(
-                "INSERT INTO memes (id, title, file_tg_id, file_tg_unique_id, embedding)
-                VALUES (?, ?, ?, ?, ?)
+                "INSERT INTO memes (id, title, file_tg_id, file_tg_unique_id, embedding, user_id, is_public)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (file_tg_unique_id)
                 DO UPDATE SET title = excluded.title;",
                 params![
@@ -51,7 +57,9 @@ impl MemeStore {
                     meme.title,
                     meme.file_tg_id,
                     meme.file_tg_unique_id,
-                    blob
+                    blob,
+                    meme.user_id,
+                    meme.is_public
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -77,20 +85,47 @@ impl MemeStore {
             .any(|meme| meme.file_tg_unique_id == unique_tg_id)
     }
 
-    pub fn find_top_k(&self, query: &[f32], k: usize) -> Vec<(&Meme, f32)> {
-        find_top_k(query, &self.memes, k)
+    pub fn find_top_k(&self, query: &[f32], k: usize, user_id: i64) -> Vec<(&Meme, f32)> {
+        find_top_k(query, &self.memes, k, user_id)
     }
 
-    pub fn len(&self) -> usize {
+    pub fn len(&self, user_id: i64) -> (usize, usize) {
+        let mut public: usize = 0;
+        let mut private: usize = 0;
+
+        for m in &self.memes {
+            if m.is_public {
+                public += 1;
+            }
+
+            if m.user_id == user_id {
+                private += 1;
+            }
+        }
+
+        return (public, private);
+    }
+
+    pub fn len_all(&self) -> usize {
         self.memes.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.len_all() == 0
     }
 
-    pub fn random_meme(&self) -> Option<&Meme> {
+    pub fn random_meme(&self, user_id: i64) -> Option<&Meme> {
         if self.is_empty() {
+            return None;
+        }
+        let matching_memes = self
+            .memes
+            .iter()
+            .filter(|m| m.user_id == user_id || m.is_public);
+
+        let count_matched = matching_memes.clone().count();
+
+        if count_matched == 0 {
             return None;
         }
 
@@ -99,8 +134,13 @@ impl MemeStore {
             .unwrap_or_default()
             .subsec_nanos() as usize;
 
-        let idx = nanos % self.memes.len();
-        Some(&self.memes[idx])
+        let idx = nanos % count_matched;
+
+        return self
+            .memes
+            .iter()
+            .filter(|i| i.user_id == user_id || i.is_public)
+            .nth(idx);
     }
 
     pub fn add_from_descriptions(
@@ -109,6 +149,7 @@ impl MemeStore {
         title: String,
         file_tg_id: String,
         file_tg_unique_id: String,
+        user_id: i64,
         descriptions: String,
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
@@ -116,7 +157,15 @@ impl MemeStore {
             .embed_passage(&descriptions)
             .map_err(|e| e.to_string())?;
 
-        let meme = Meme::new(id, title, embed, file_tg_id, file_tg_unique_id);
+        let meme = Meme::new(
+            id,
+            title,
+            embed,
+            file_tg_id,
+            file_tg_unique_id,
+            user_id,
+            true,
+        );
         self.add(meme)?;
         Ok(())
     }
@@ -126,26 +175,38 @@ impl MemeStore {
         query_text: &str,
         engine: &mut ClipEngine,
         k: usize,
+        user_id: i64,
     ) -> Result<Vec<(&'a Meme, f32)>, String> {
         let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
 
-        let top_k = self.find_top_k(&embed, k);
+        let top_k = self.find_top_k(&embed, k, user_id);
 
         Ok(top_k)
     }
 
     pub fn open(db_connection: &str) -> Result<Self, String> {
         let conn = Connection::open(db_connection).map_err(|e| e.to_string())?;
-        conn.execute(
+        conn.execute_batch(
             "\
         CREATE TABLE IF NOT EXISTS memes (\
             id INTEGER PRIMARY KEY AUTOINCREMENT, \
             title TEXT NOT NULL, \
             file_tg_id TEXT NOT NULL, \
             file_tg_unique_id TEXT NOT NULL UNIQUE, \
-            embedding BLOB NOT NULL\
-            );",
-            [],
+            embedding BLOB NOT NULL,\
+            user_id BIGINT NOT NULL DEFAULT 0,\
+            is_public BOOLEAN NOT NULL DEFAULT 0
+            );
+
+        CREATE TABLE IF NOT EXISTS users (
+            user_id BIGINT PRIMARY KEY,               -- Telegram User ID
+            username TEXT,                            -- Telegram @username
+            search_scope TEXT NOT NULL DEFAULT 'all', -- 'all', 'public_only', 'private_only'
+            created_at INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_memes_user_is_public ON memes (user_id, is_public);
+            ",
         )
         .map_err(|e| e.to_string())?;
 
@@ -161,6 +222,8 @@ impl MemeStore {
                 let file_tg_unique_id: String = row.get(3)?;
                 let blob: Vec<u8> = row.get(4)?;
                 let embedding = blob_to_embedding(&blob);
+                let user_id = row.get(5)?;
+                let is_public = row.get(6)?;
 
                 Ok(Meme::new(
                     id,
@@ -168,6 +231,8 @@ impl MemeStore {
                     embedding,
                     file_tg_id,
                     file_tg_unique_id,
+                    user_id,
+                    is_public,
                 ))
             })
             .map_err(|e| e.to_string())?;
@@ -215,12 +280,19 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
-pub fn find_top_k<'a>(query: &[f32], memes: &'a [Meme], k: usize) -> Vec<(&'a Meme, f32)> {
+pub fn find_top_k<'a>(
+    query: &[f32],
+    memes: &'a [Meme],
+    k: usize,
+    user_id: i64,
+) -> Vec<(&'a Meme, f32)> {
     let mut top_k: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
 
     for n in 0..memes.len() {
-        if let Ok(value) = cosine_similarity(query, &memes[n].embeding) {
-            top_k.push((&memes[n], value));
+        if memes[n].user_id == user_id || memes[n].is_public {
+            if let Ok(value) = cosine_similarity(query, &memes[n].embeding) {
+                top_k.push((&memes[n], value));
+            }
         }
     }
 

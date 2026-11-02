@@ -18,6 +18,7 @@ pub struct MemeJob {
     pub file_unique_id: String,
     pub captions: String,
     pub retry_count: u8,
+    pub user_id: i64,
 }
 
 pub fn start_worker(
@@ -111,6 +112,7 @@ pub fn start_worker(
                 full_title.clone(),
                 job.file_id,
                 job.file_unique_id,
+                job.user_id,
                 descriptions,
                 &mut engine,
             ) {

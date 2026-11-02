@@ -51,10 +51,16 @@ pub async fn help(bot: Bot, msg: Message) -> Result<Message, RequestError> {
 
 pub async fn stats(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Message, RequestError> {
     let meme_store = state.meme_store.lock().await;
+
+    let (public, private) = meme_store.len(msg.chat.id.0);
+
     let message = bot
         .send_message(
             msg.chat.id,
-            format!("In storage we have [{}] memes", meme_store.len()),
+            format!(
+                "In storage we have PUBLIC of pure haos: [{}] and PRIVATE best of the best trash: [{}] memes",
+                public, private
+            ),
         )
         .await?;
 
@@ -65,7 +71,7 @@ pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Mess
     let message: Message;
 
     let meme_store = state.meme_store.lock().await;
-    if let Some(meme) = meme_store.random_meme() {
+    if let Some(meme) = meme_store.random_meme(msg.chat.id.0) {
         if !meme.file_tg_id.is_empty() {
             message = bot
                 .send_photo(

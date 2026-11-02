@@ -45,6 +45,7 @@ pub async fn handle_photo(
             .unwrap_or("no content from lazy user")
             .to_string(),
         retry_count: 0,
+        user_id: msg.chat.id.0,
     };
 
     if let Err(e) = sender.send(job).await {
@@ -71,7 +72,7 @@ pub async fn handle_search(
     let mut engine = state.engine.lock().await;
     let meme_store = state.meme_store.lock().await;
 
-    match meme_store.search_top_k(text, &mut engine, app_config.top_k) {
+    match meme_store.search_top_k(text, &mut engine, app_config.top_k, msg.chat.id.0) {
         Ok(results) if results.is_empty() => {
             bot.send_message(msg.chat.id, "There is nothing here...")
                 .await?;
