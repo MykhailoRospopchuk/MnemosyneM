@@ -4,11 +4,14 @@ use teloxide::Bot;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::FileId;
+use teloxide::types::InlineKeyboardButton;
+use teloxide::types::InlineKeyboardMarkup;
 use teloxide::types::InputFile;
 use teloxide::types::Message;
 use teloxide::utils::command::BotCommands;
 
 use crate::AppState;
+use crate::db::UserSetting;
 
 #[derive(BotCommands, Clone)]
 #[command(
@@ -24,6 +27,8 @@ pub enum Command {
     Stats,
     #[command(description = "Show meme random meme")]
     Random,
+    #[command(description = "Set up your stuff")]
+    Settings,
 }
 
 pub async fn start(bot: Bot, msg: Message) -> Result<Message, RequestError> {
@@ -106,4 +111,56 @@ pub async fn error(bot: Bot, msg: Message) -> Result<Message, RequestError> {
         .await?;
 
     Ok(message)
+}
+
+pub async fn settings(
+    bot: Bot,
+    msg: Message,
+    state: Arc<AppState>,
+) -> Result<Message, RequestError> {
+    let (text, keyboard) = {
+        let meme_store = state.meme_store.lock().await;
+        let s = meme_store.get_user_settings(msg.chat.id.0);
+
+        format_settings(&s)
+    };
+
+    bot.send_message(msg.chat.id, text)
+        .reply_markup(keyboard)
+        .await
+}
+
+pub fn format_settings(settings: &UserSetting) -> (String, InlineKeyboardMarkup) {
+    let upload_label = if settings.upload_as_public {
+        "[P] Public"
+    } else {
+        "[P] Private"
+    };
+
+    let scope_label = match settings.search_scope.as_str() {
+        "private_only" => "[M] Only my memes",
+        "public_only" => "[O] Only public memes",
+        _ => "[A] All (Public + Mine)",
+    };
+
+    let text = format!(
+        "
+[S] User settings:\n
+    Uploading: {}\n
+    Search: {}\n",
+        upload_label, scope_label
+    );
+
+    let keyboard = InlineKeyboardMarkup::new(vec![
+        vec![InlineKeyboardButton::callback(
+            format!("Uploading: {}", upload_label),
+            "toggle_upload",
+        )],
+        vec![InlineKeyboardButton::callback(
+            format!("Search: {}", scope_label),
+            "cycle_scope",
+        )],
+    ]);
+
+    (text, keyboard)
 }
