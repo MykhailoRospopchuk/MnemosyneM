@@ -296,18 +296,21 @@ Meme ID: 1793041234
   - [x] Multi-item search results sent as Telegram media group albums.
   - [x] Fast in-memory deduplication check via `telegram_file_unique_id`.
 - [ ] **v0.2: UX & Queue & Privacy & Inline Mode**
-  - [x] Concise Telegram response format (remove Gemini text dumps).
+  - [x] Concise Telegram response format (remove Gemini text dumps, clean match % & captions).
+  - [x] MPSC background queue worker with 4-second pacing (15 RPM guard) & poison pill protection.
+  - [x] SQLite schema update (`user_id`, `is_public`, `users` table with username/first_name/last_name).
+  - [x] User Settings & Privacy controls (`/settings` interactive inline menu for Public vs Private upload).
+  - [x] Search scope selection (`all`, `public_only`, `private_only`) with in-place button cycling.
+  - [x] Automatic user profile registration and sync on incoming messages.
+  - [x] Zero-allocation $O(1)$ memory `random_meme` selection.
   - [ ] Telegram Inline Query handler (`Update::filter_inline_query`).
   - [ ] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
   - [ ] Multi-tenancy inline cache control (`is_personal = true`).
   - [ ] BotFather inline configuration (`/setinline`).
-  - [x] MPSC background queue worker with 4-second pacing (15 RPM guard).
-  - [ ] SQLite schema update (`user_id`, `is_public`, `status`).
-  - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private`).
-  - [ ] Search scope selection (`all`, `public_only`, `private_only`).
+  - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
-  - [x] Automated quarantine / rejection for explicit content / NSFW.
+  - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**
   - [ ] Criterion micro-benchmarks suite for 768-dim vector cosine similarity.
