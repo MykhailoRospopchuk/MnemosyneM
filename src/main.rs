@@ -5,7 +5,7 @@ mod engine;
 mod vlm;
 mod worker;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use teloxide::Bot;
 use tokio::sync::Mutex;
@@ -13,6 +13,7 @@ use tokio::sync::Mutex;
 struct AppState {
     meme_store: Mutex<db::MemeStore>,
     engine: Mutex<engine::ClipEngine>,
+    last_inline_query: Mutex<HashMap<i64, String>>,
 }
 
 #[tokio::main]
@@ -30,6 +31,7 @@ async fn main() {
     let state = Arc::new(AppState {
         meme_store: Mutex::new(store),
         engine: Mutex::new(engine),
+        last_inline_query: Mutex::new(HashMap::new()),
     });
 
     let bot = Bot::from_env();

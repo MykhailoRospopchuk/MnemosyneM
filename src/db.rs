@@ -432,6 +432,20 @@ impl MemeStore {
         }
         Ok(())
     }
+
+    pub fn get_recent_memes(&self, user_id: i64, limit: usize) -> Vec<&Meme> {
+        let settings = self.get_user_settings(user_id);
+        self.memes
+            .iter()
+            .rev()
+            .filter(|m| match settings.search_scope.as_str() {
+                "private_only" => m.user_id == user_id,
+                "public_only" => m.is_public,
+                _ => m.user_id == user_id || m.is_public,
+            })
+            .take(limit)
+            .collect()
+    }
 }
 
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {

@@ -143,13 +143,7 @@ pub fn format_settings(settings: &UserSetting) -> (String, InlineKeyboardMarkup)
         _ => "[A] All (Public + Mine)",
     };
 
-    let text = format!(
-        "
-[S] User settings:\n
-    Uploading: {}\n
-    Search: {}\n",
-        upload_label, scope_label
-    );
+    let text = format!("[S] User settings:\n");
 
     let keyboard = InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(

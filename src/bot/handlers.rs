@@ -4,7 +4,10 @@ use crate::worker::MemeJob;
 use m_nemosyne_m::score_calibration;
 use std::sync::Arc;
 use teloxide::prelude::*;
-use teloxide::types::{FileId, InputFile, InputMedia, InputMediaPhoto, Message, PhotoSize};
+use teloxide::types::{
+    FileId, InlineQueryResult, InlineQueryResultCachedPhoto, InputFile, InputMedia,
+    InputMediaPhoto, Message, PhotoSize,
+};
 use tokio::sync::mpsc::Sender;
 
 pub async fn handle_photo(
@@ -66,8 +69,7 @@ pub async fn handle_search(
     app_config: &'static AppConfig,
 ) -> ResponseResult<()> {
     bot.send_message(msg.chat.id, "Process search...").await?;
-    println!("\n---- [SEARCH] ----");
-    println!("[1/4] User query: [{}]", text);
+    println!("\n---- [SEARCH] ---- User query: [{}]", text);
 
     let mut engine = state.engine.lock().await;
     let meme_store = state.meme_store.lock().await;
@@ -130,5 +132,106 @@ pub async fn handle_search(
                 .await?;
         }
     }
+    Ok(())
+}
+
+pub async fn handle_inline_query(
+    bot: Bot,
+    query: InlineQuery,
+    state: Arc<AppState>,
+    app_config: &'static AppConfig,
+) -> ResponseResult<()> {
+    let user_id = query.from.id.0 as i64;
+    let query_text = query.query.trim();
+
+    if query_text.is_empty() {
+        let meme_store = state.meme_store.lock().await;
+        let recent_memes = meme_store.get_recent_memes(user_id, 5);
+
+        let result: Vec<InlineQueryResult> = recent_memes
+            .into_iter()
+            .enumerate()
+            .filter(|(_, meme)| !meme.file_tg_id.is_empty())
+            .map(|(idx, meme)| {
+                InlineQueryResult::CachedPhoto(InlineQueryResultCachedPhoto::new(
+                    format!("{}_{}", meme.id, idx),
+                    FileId(meme.file_tg_id.clone()),
+                ))
+            })
+            .collect();
+
+        if let Err(e) = bot
+            .answer_inline_query(query.id, result)
+            .is_personal(true)
+            .cache_time(5)
+            .await
+        {
+            eprintln!("[ERROR] Inline search for empty query error: {}", e);
+        }
+        return Ok(());
+    }
+
+    if query_text.chars().count() < 4 {
+        if let Err(e) = bot
+            .answer_inline_query(query.id.clone(), vec![])
+            .is_personal(true)
+            .cache_time(5)
+            .await
+        {
+            eprintln!("[ERROR] Inline search fro short query error: {}", e);
+        }
+        return Ok(());
+    }
+
+    {
+        let mut last_queries = state.last_inline_query.lock().await;
+        last_queries.insert(user_id, query.id.0.clone());
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    {
+        let last_queries = state.last_inline_query.lock().await;
+        if last_queries.get(&user_id) != Some(&query.id.0) {
+            return Ok(());
+        }
+    }
+
+    println!("\n---- [INLINE_SEARCH] ---- User query: [{}]", query_text);
+
+    let mut engine = state.engine.lock().await;
+    let meme_store = state.meme_store.lock().await;
+
+    let results = match meme_store.search_top_k(query_text, &mut engine, app_config.top_k, user_id)
+    {
+        Ok(matches) => matches
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
+            .map(|(idx, (meme, score))| {
+                InlineQueryResult::CachedPhoto(
+                    InlineQueryResultCachedPhoto::new(
+                        format!("{}_{}", meme.id, idx),
+                        FileId(meme.file_tg_id.clone()),
+                    )
+                    .caption(format!("📊 Match: {:.3} %", score_calibration(score))),
+                )
+            })
+            .collect(),
+        Err(e) => {
+            eprintln!("[ERROR] Inline search error: {}", e);
+            vec![]
+        }
+    };
+
+    if let Err(e) = bot
+        .answer_inline_query(query.id, results)
+        .is_personal(true)
+        .cache_time(30)
+        .await
+    {
+        eprintln!("[WARN] Failed to answer inline query: {}", e);
+    }
+
     Ok(())
 }

@@ -55,7 +55,7 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
         "safetySettings": [
             {
                 "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-                "threshold": "BLOCK_LOW_AND_ABOVE"
+                "threshold": "BLOCK_ONLY_HIGH"
             },
             {
                 "category": "HARM_CATEGORY_DANGEROUS_CONTENT",
@@ -95,7 +95,10 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
     let description = json_responce["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
         .ok_or_else(|| {
-            VlmError::Transient(format!("Invalid responce from Gemini: {:?}", json_responce))
+            VlmError::Transient(format!(
+                "Invalid responce from Gemini: {:?}",
+                json_responce["candidates"][0]["finishMessage"]
+            ))
         })?
         .to_string();
 

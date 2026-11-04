@@ -303,10 +303,10 @@ Meme ID: 1793041234
   - [x] Search scope selection (`all`, `public_only`, `private_only`) with in-place button cycling.
   - [x] Automatic user profile registration and sync on incoming messages.
   - [x] Zero-allocation $O(1)$ memory `random_meme` selection.
-  - [ ] Telegram Inline Query handler (`Update::filter_inline_query`).
-  - [ ] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
-  - [ ] Multi-tenancy inline cache control (`is_personal = true`).
-  - [ ] BotFather inline configuration (`/setinline`).
+  - [x] Telegram Inline Query handler (`Update::filter_inline_query`).
+  - [x] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
+  - [x] Multi-tenancy inline cache control (`is_personal = true`) & Async Debounce (500ms).
+  - [x] BotFather inline configuration (`/setinline`).
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.

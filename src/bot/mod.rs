@@ -25,7 +25,8 @@ pub async fn run_bot(
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(message_handler))
-        .branch(Update::filter_callback_query().endpoint(callback_handler));
+        .branch(Update::filter_callback_query().endpoint(callback_handler))
+        .branch(Update::filter_inline_query().endpoint(inline_query_handler));
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![state, sender, app_config])
@@ -125,6 +126,19 @@ pub async fn callback_handler(
             }
         }
     }
+    Ok(())
+}
+
+pub async fn inline_query_handler(
+    bot: Bot,
+    query: InlineQuery,
+    state: Arc<AppState>,
+    app_config: &'static AppConfig,
+) -> ResponseResult<()> {
+    check_user(query.from.clone(), &state).await;
+
+    handlers::handle_inline_query(bot, query, state, app_config).await?;
+
     Ok(())
 }
 
