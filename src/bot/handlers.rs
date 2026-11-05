@@ -1,7 +1,6 @@
 use crate::AppState;
 use crate::config::AppConfig;
 use crate::worker::MemeJob;
-use m_nemosyne_m::score_calibration;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
@@ -96,10 +95,7 @@ pub async fn handle_search(
                         msg.chat.id,
                         InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
                     )
-                    .caption(format!(
-                        "📊 Match: {:.3} %",
-                        score_calibration(single_score)
-                    ))
+                    .caption(format!("📊 Match: {:.3} %", single_score))
                     .await
                 {
                     eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
@@ -114,7 +110,7 @@ pub async fn handle_search(
                             InputMediaPhoto::new(InputFile::file_id(FileId(
                                 meme.file_tg_id.clone(),
                             )))
-                            .caption(format!("📊 Match: {:.3} %", score_calibration(*score))),
+                            .caption(format!("📊 Match: {:.3}", score)),
                         )
                     })
                     .collect();
@@ -214,7 +210,7 @@ pub async fn handle_inline_query(
                         format!("{}_{}", meme.id, idx),
                         FileId(meme.file_tg_id.clone()),
                     )
-                    .caption(format!("📊 Match: {:.3} %", score_calibration(score))),
+                    .caption(format!("📊 Match: {:.3}", score)),
                 )
             })
             .collect(),
