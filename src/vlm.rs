@@ -137,23 +137,6 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
         .as_str()
         .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
-    let lower = raw_text.to_lowercase();
-    if raw_text.contains("[REJECTED_NSFW]")
-        || lower.contains("nsfw")
-        || lower.contains("pornography")
-        || lower.contains("порнографія")
-        || lower.contains("exposed genitals")
-        || lower.contains("голі геніталії")
-    {
-        println!(
-            "[VLM BLOCKED] Explicit/NSFW content detected in description! Gemini response: {}",
-            json_responce
-        );
-        return Err(VlmError::InappropriateContent(
-            "Inappropriate content detected: NSFW/Adult content is not allowed!".to_string(),
-        ));
-    }
-
     let clean_json = raw_text
         .trim()
         .strip_prefix("```json")
@@ -166,8 +149,12 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
     let analysis: MemeAnalysis = serde_json::from_str(clean_json)
         .map_err(|e| VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text)))?;
     if analysis.is_nsfw {
+        println!(
+            "[VLM BLOCKED] Explicit/NSFW content detected in description! Gemini response: {}",
+            json_responce
+        );
         return Err(VlmError::InappropriateContent(
-            "NSFW explicit content detected".to_string(),
+            "NSFW explicit content detected. Inappropriate content detected: NSFW/Adult content is not allowed!".to_string(),
         ));
     }
     println!("[VLM] Sucessfully processed image in AI!");
