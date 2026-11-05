@@ -119,6 +119,7 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
             Ok(r) => r,
             Err(e) => {
                 last_error = e.to_string();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 continue;
             }
         };
@@ -132,6 +133,7 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
                 model, status
             );
             last_error = format!("Google API {}: Model busy/overloaded", status);
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             continue;
         }
 
