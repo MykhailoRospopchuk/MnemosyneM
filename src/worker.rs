@@ -76,10 +76,13 @@ pub fn start_worker(
                     if job.retry_count < 2 {
                         let mut retried_job = job;
                         retried_job.retry_count += 1;
+                        let delay_sec = 5 * retried_job.retry_count as u64;
                         println!(
-                            "[WORKER] Retrying meme {} (attempt {}/2)...",
-                            retried_job.file_unique_id, retried_job.retry_count
+                            "[WORKER] Retrying meme {} (attempt {}/2)... after {} sec",
+                            retried_job.file_unique_id, retried_job.retry_count, delay_sec
                         );
+
+                        tokio::time::sleep(Duration::from_secs(delay_sec)).await;
                         let _ = sender.send(retried_job).await;
                     } else {
                         eprintln!(

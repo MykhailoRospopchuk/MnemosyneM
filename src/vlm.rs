@@ -1,8 +1,16 @@
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+
+const GEMINNI_MODEL_POOL: &[&str] = &[
+    "gemini-3.5-flash-lite",
+    "gemini-3.5-flash",
+    "gemini-3.6-flash",
+    "gemini-3.1-flash-lite",
+];
 
 #[derive(Debug)]
 pub enum VlmError {
@@ -29,16 +37,15 @@ pub struct MemeAnalysis {
 
 pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnalysis, VlmError> {
     let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(25))
+        .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| VlmError::Transient(e.to_string()))?;
 
     let base64_image = STANDARD.encode(image_bytes);
 
-    let url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent".to_string();
-
     println!(
-        "[VLM] Send image to Gemini 3.5 Flash (image: {} KB)...",
+        "[VLM] Send image to Gemini {} (image: {} KB)...",
+        GEMINNI_MODEL_POOL[0],
         image_bytes.len() / 1024
     );
 
@@ -94,69 +101,100 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
         ]
     });
 
-    let res = client
-        .post(&url)
-        .header("x-goog-api-key", api_key)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| VlmError::Transient(e.to_string()))?;
+    let mut last_error = String::new();
 
-    let status = res.status();
-    println!("[VLM] Received HTTP status: {}", status);
+    for model in GEMINNI_MODEL_POOL {
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent",
+            model
+        );
 
-    let json_responce: serde_json::Value = res
-        .json()
-        .await
-        .map_err(|e| VlmError::Transient(e.to_string()))?;
+        let res = match client
+            .post(&url)
+            .header("x-goog-api-key", api_key)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                last_error = e.to_string();
+                continue;
+            }
+        };
 
-    if !status.is_success() {
-        let err_msg = json_responce["error"]["message"]
+        let status = res.status();
+        println!("[VLM] Received HTTP status: {} | model {}", status, model);
+
+        if status == StatusCode::SERVICE_UNAVAILABLE || status == StatusCode::TOO_MANY_REQUESTS {
+            eprintln!(
+                "[VLM] {} is busy (status {}). Switch to next model...",
+                model, status
+            );
+            last_error = format!("Google API {}: Model busy/overloaded", status);
+            continue;
+        }
+
+        let json_responce: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| VlmError::Transient(e.to_string()))?;
+
+        if !status.is_success() {
+            let err_msg = json_responce["error"]["message"]
+                .as_str()
+                .unwrap_or("Unknown Gemini API error");
+            eprintln!("[VLM ERROR] Google API returned {}: {}", status, err_msg);
+            return Err(VlmError::Transient(format!(
+                "Google API {}: {}",
+                status, err_msg
+            )));
+        }
+
+        if let Some(candidate) = json_responce["candidates"].get(0) {
+            if candidate["finishReason"].as_str() == Some("SAFETY") {
+                println!(
+                    "[VLM BLOCKED] Gemini blocked this image by Safety Filter! Gemini response: {}",
+                    json_responce
+                );
+                return Err(VlmError::InappropriateContent(
+                    "Inappropriate content detected (Gemini Safety Filter Explicit/NSFW)"
+                        .to_string(),
+                ));
+            }
+        }
+
+        let raw_text = json_responce["candidates"][0]["content"]["parts"][0]["text"]
             .as_str()
-            .unwrap_or("Unknown Gemini API error");
-        eprintln!("[VLM ERROR] Google API returned {}: {}", status, err_msg);
-        return Err(VlmError::Transient(format!(
-            "Google API {}: {}",
-            status, err_msg
-        )));
-    }
+            .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
-    if let Some(candidate) = json_responce["candidates"].get(0) {
-        if candidate["finishReason"].as_str() == Some("SAFETY") {
+        let clean_json = raw_text
+            .trim()
+            .strip_prefix("```json")
+            .unwrap_or(raw_text)
+            .strip_prefix("```")
+            .unwrap_or(raw_text)
+            .strip_suffix("```")
+            .unwrap_or(raw_text)
+            .trim();
+        let analysis: MemeAnalysis = serde_json::from_str(clean_json).map_err(|e| {
+            VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text))
+        })?;
+        if analysis.is_nsfw {
             println!(
-                "[VLM BLOCKED] Gemini blocked this image by Safety Filter! Gemini response: {}",
+                "[VLM BLOCKED] Explicit/NSFW content detected in description! Gemini response: {}",
                 json_responce
             );
             return Err(VlmError::InappropriateContent(
-                "Inappropriate content detected (Gemini Safety Filter Explicit/NSFW)".to_string(),
-            ));
-        }
-    }
-
-    let raw_text = json_responce["candidates"][0]["content"]["parts"][0]["text"]
-        .as_str()
-        .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
-
-    let clean_json = raw_text
-        .trim()
-        .strip_prefix("```json")
-        .unwrap_or(raw_text)
-        .strip_prefix("```")
-        .unwrap_or(raw_text)
-        .strip_suffix("```")
-        .unwrap_or(raw_text)
-        .trim();
-    let analysis: MemeAnalysis = serde_json::from_str(clean_json)
-        .map_err(|e| VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text)))?;
-    if analysis.is_nsfw {
-        println!(
-            "[VLM BLOCKED] Explicit/NSFW content detected in description! Gemini response: {}",
-            json_responce
-        );
-        return Err(VlmError::InappropriateContent(
             "NSFW explicit content detected. Inappropriate content detected: NSFW/Adult content is not allowed!".to_string(),
         ));
+        }
+        println!("[VLM] Sucessfully processed image in AI!");
+        return Ok(analysis);
     }
-    println!("[VLM] Sucessfully processed image in AI!");
-    Ok(analysis)
+
+    Err(VlmError::Transient(format!(
+        "All VLM models failed. Last error: {}",
+        last_error
+    )))
 }

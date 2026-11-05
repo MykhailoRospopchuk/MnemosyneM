@@ -283,7 +283,7 @@ pub async fn handle_inline_query(
 pub fn build_caption(source_title: &str, source_url: &str, score: &f32) -> String {
     let caption = if !source_url.is_empty() {
         format!(
-            "📊 Match: {:.1}%\n => Source: [{}]({})",
+            "📊 Match: {:.1}%\n => Source: [{}] => ({})",
             score * 100.0,
             source_title,
             source_url

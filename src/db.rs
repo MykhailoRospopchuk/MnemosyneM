@@ -102,7 +102,7 @@ impl MemeStore {
                 .as_secs();
 
             self.conn.execute("
-                INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_caption, is_public, created_at)
+                INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
                 VALUES (?, ?, ?, ?, ?)",
                 params![user_id, meme.id, caption, user_settings.upload_as_public, now])
             .map_err(|e| e.to_string())?;
@@ -187,7 +187,7 @@ impl MemeStore {
             .map_err(|e| e.to_string())?;
 
         self.conn.execute("
-            INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_caption, is_public, created_at)
+            INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
             VALUES (?, ?, ?, ?, ?)",
             params![
                 user_id, id, title, is_public, now
@@ -636,7 +636,7 @@ pub fn find_top_k<'a>(
                 .filter(|&&w| ocr_lower.contains(w))
                 .count();
             if matches > 0 {
-                let boost = 0.12 * (matches as f32 / query_words.len() as f32);
+                let boost = 0.04 * (matches as f32 / query_words.len() as f32);
                 best_score = (best_score + boost).min(1.0);
             }
         }
