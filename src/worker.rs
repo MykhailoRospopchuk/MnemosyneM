@@ -19,6 +19,8 @@ pub struct MemeJob {
     pub captions: String,
     pub retry_count: u8,
     pub user_id: i64,
+    pub source_title: String,
+    pub source_url: String,
 }
 
 pub fn start_worker(
@@ -117,6 +119,8 @@ pub fn start_worker(
                 job.file_id,
                 job.file_unique_id,
                 job.user_id,
+                job.source_title,
+                job.source_url,
                 &mut engine,
             ) {
                 Ok(()) => {

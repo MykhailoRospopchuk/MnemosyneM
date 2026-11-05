@@ -13,8 +13,18 @@ pub struct Meme {
     embedding_en: Vec<f32>,
     pub file_tg_id: String,
     pub file_tg_unique_id: String,
-    pub user_id: i64,
+    pub source_title: String,
+    pub source_url: String,
     pub is_public: bool,
+    pub owners: Vec<i64>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct UserMeme {
+    pub user_id: i64,
+    pub meme_id: u64,
+    pub user_captions: String,
+    is_public: bool,
+    created_at: i64,
 }
 
 #[derive(Debug)]
@@ -34,6 +44,12 @@ pub struct UserSetting {
     pub search_scope: String,
 }
 
+pub enum BookMarkStatus {
+    AlreadyInCollection,
+    AddetInstantly,
+    NewMemeNeeded,
+}
+
 impl Default for UserSetting {
     fn default() -> Self {
         Self {
@@ -47,7 +63,63 @@ impl Default for UserSetting {
     }
 }
 
+impl Meme {
+    pub fn is_owned_by(&self, user_id: i64) -> bool {
+        self.owners.contains(&user_id)
+    }
+
+    pub fn is_visible_to(&self, user_id: i64, scope: &str) -> bool {
+        match scope {
+            "private_only" => self.is_owned_by(user_id),
+            "public_only" => self.is_public,
+            _ => self.is_public || self.is_owned_by(user_id),
+        }
+    }
+}
+
 impl MemeStore {
+    pub fn check_or_add_bookmark(
+        &mut self,
+        unique_id: &str,
+        user_id: i64,
+        caption: &str,
+    ) -> Result<BookMarkStatus, String> {
+        let mame_opt = self
+            .memes
+            .iter()
+            .find(|m| m.file_tg_unique_id == unique_id)
+            .cloned();
+
+        if let Some(meme) = mame_opt {
+            if meme.is_owned_by(user_id) {
+                return Ok(BookMarkStatus::AlreadyInCollection);
+            }
+
+            let user_settings = self.get_user_settings(user_id);
+            let now = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+
+            self.conn.execute("
+                INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_caption, is_public, created_at)
+                VALUES (?, ?, ?, ?, ?)",
+                params![user_id, meme.id, caption, user_settings.upload_as_public, now])
+            .map_err(|e| e.to_string())?;
+
+            if let Some(m) = self.memes.iter_mut().find(|m| m.id == meme.id) {
+                m.owners.push(user_id);
+                if user_settings.upload_as_public {
+                    m.is_public = true;
+                }
+            }
+
+            return Ok(BookMarkStatus::AddetInstantly);
+        }
+
+        Ok(BookMarkStatus::NewMemeNeeded)
+    }
+
     pub fn add_from_analysis(
         &mut self,
         id: u64,
@@ -56,6 +128,8 @@ impl MemeStore {
         file_tg_id: String,
         file_tg_unique_id: String,
         user_id: i64,
+        source_title: String,
+        source_url: String,
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
         let passage_uk = format!("{} | {}", analysis.ocr_text, analysis.uk_description);
@@ -73,12 +147,17 @@ impl MemeStore {
         let blob_uk = self::embedding_to_blob(&embed_uk);
         let blob_en = self::embedding_to_blob(&embed_en);
 
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
         self.conn
             .execute(
                 "INSERT INTO memes (
                     id, title, ocr_text, description_uk, description_en,
                     embedding_uk, embedding_en,
-                    file_tg_id, file_tg_unique_id, user_id, is_public
+                    file_tg_id, file_tg_unique_id, source_title, source_url
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (file_tg_unique_id)
@@ -88,7 +167,9 @@ impl MemeStore {
                     description_uk = excluded.description_uk,
                     description_en = excluded.description_en,
                     embedding_uk = excluded.embedding_uk,
-                    embedding_en = excluded.embedding_en;",
+                    embedding_en = excluded.embedding_en,
+                    source_title = excluded.source_title,
+                    source_url = excluded.source_url ;",
                 params![
                     id,
                     title,
@@ -99,11 +180,18 @@ impl MemeStore {
                     blob_en,
                     file_tg_id,
                     file_tg_unique_id,
-                    user_id,
-                    is_public
+                    source_title,
+                    source_url
                 ],
             )
             .map_err(|e| e.to_string())?;
+
+        self.conn.execute("
+            INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_caption, is_public, created_at)
+            VALUES (?, ?, ?, ?, ?)",
+            params![
+                user_id, id, title, is_public, now
+            ]).map_err(|e| e.to_string())?;
 
         let meme = Meme {
             id,
@@ -113,8 +201,10 @@ impl MemeStore {
             embedding_en: embed_en,
             file_tg_id,
             file_tg_unique_id,
-            user_id,
+            source_title,
+            source_url,
             is_public,
+            owners: vec![user_id],
         };
 
         if let Some(item) = self
@@ -130,12 +220,6 @@ impl MemeStore {
         Ok(())
     }
 
-    pub fn conains_meme(&self, unique_tg_id: &str) -> bool {
-        self.memes
-            .iter()
-            .any(|meme| meme.file_tg_unique_id == unique_tg_id)
-    }
-
     pub fn len(&self, user_id: i64) -> (usize, usize) {
         let mut public: usize = 0;
         let mut private: usize = 0;
@@ -145,7 +229,7 @@ impl MemeStore {
                 public += 1;
             }
 
-            if m.user_id == user_id {
+            if m.is_owned_by(user_id) {
                 private += 1;
             }
         }
@@ -168,7 +252,7 @@ impl MemeStore {
         let matching_memes = self
             .memes
             .iter()
-            .filter(|m| m.user_id == user_id || m.is_public);
+            .filter(|m| m.is_visible_to(user_id, "all"));
 
         let count_matched = matching_memes.clone().count();
 
@@ -186,7 +270,7 @@ impl MemeStore {
         return self
             .memes
             .iter()
-            .filter(|i| i.user_id == user_id || i.is_public)
+            .filter(|i| i.is_visible_to(user_id, "all"))
             .nth(idx);
     }
 
@@ -202,27 +286,36 @@ impl MemeStore {
                 description_en TEXT NOT NULL,
                 embedding_uk BLOB NOT NULL,
                 embedding_en BLOB NOT NULL,
-                file_tg_id TEXT NOT NULL,
+                file_tg_id TEXT NOT NULL UNIQUE,
                 file_tg_unique_id TEXT NOT NULL UNIQUE,
-                user_id BIGINT NOT NULL DEFAULT 0,
-                is_public BOOLEAN NOT NULL DEFAULT 0
+                source_title TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT ''
             );
+
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
                 username TEXT,
                 first_name TEXT,
                 last_name TEXT,
                 search_scope TEXT NOT NULL DEFAULT 'all',
-                created_at INTEGER NOT NULL,
+                created_at BIGINT NOT NULL,
                 upload_as_public BOOLEAN NOT NULL DEFAULT 1
             );
-            CREATE INDEX IF NOT EXISTS idx_memes_user_is_public ON memes (user_id, is_public);
+
+            CREATE TABLE IF NOT EXISTS user_memes (
+                user_id BIGINT NOT NULL,
+                meme_id INTEGER NOT NULL,
+                user_captions TEXT NOT NULL DEFAULT '',
+                is_public BOOLEAN NOT NULL DEFAULT 0,
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY (user_id, meme_id)
+            );
             ",
         )
         .map_err(|e| e.to_string())?;
 
         let mut stmt = conn
-                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, user_id, is_public FROM memes")
+                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, source_title, source_url FROM memes")
                     .map_err(|e| e.to_string())?;
         let meme_iter = stmt
             .query_map([], |row| {
@@ -233,8 +326,8 @@ impl MemeStore {
                 let blob_en: Vec<u8> = row.get(4)?;
                 let file_tg_id: String = row.get(5)?;
                 let file_tg_unique_id: String = row.get(6)?;
-                let user_id: i64 = row.get(7)?;
-                let is_public: bool = row.get(8)?;
+                let source_title: String = row.get(7)?;
+                let source_url: String = row.get(8)?;
                 Ok(Meme {
                     id,
                     title,
@@ -243,21 +336,59 @@ impl MemeStore {
                     embedding_en: blob_to_embedding(&blob_en),
                     file_tg_id,
                     file_tg_unique_id,
-                    user_id,
-                    is_public,
+                    source_title,
+                    source_url,
+                    is_public: false,
+                    owners: vec![],
                 })
             })
             .map_err(|e| e.to_string())?;
 
-        let mut memes: Vec<Meme> = Vec::new();
+        let mut memes_map: HashMap<u64, Meme> = HashMap::new();
         for meme in meme_iter {
             let item = meme.map_err(|e| e.to_string());
             match item {
-                Ok(item) => memes.push(item),
+                Ok(item) => memes_map.insert(item.id, item),
                 Err(e) => return Err(e.to_string()),
-            }
+            };
         }
         drop(stmt);
+
+        let mut um_stmt = conn
+            .prepare(
+                "SELECT user_id, meme_id, user_captions, is_public, created_at from user_memes",
+            )
+            .map_err(|e| e.to_string())?;
+
+        let um_iter = um_stmt
+            .query_map([], |row| {
+                let user_id: i64 = row.get(0)?;
+                let meme_id: u64 = row.get(1)?;
+                let user_captions: String = row.get(2)?;
+                let is_public: bool = row.get(3)?;
+                let created_at: i64 = row.get(4)?;
+                Ok(UserMeme {
+                    user_id,
+                    meme_id,
+                    user_captions,
+                    is_public,
+                    created_at,
+                })
+            })
+            .map_err(|e| e.to_string())?;
+
+        for um in um_iter.flatten() {
+            if let Some(mem) = memes_map.get_mut(&um.meme_id) {
+                mem.owners.push(um.user_id);
+                if um.is_public {
+                    mem.is_public = true;
+                }
+            }
+        }
+
+        drop(um_stmt);
+
+        let memes: Vec<Meme> = memes_map.into_values().collect();
 
         let mut user_smpt = conn
             .prepare("SELECT user_id, username, search_scope, upload_as_public, first_name, last_name FROM users")
@@ -415,11 +546,7 @@ impl MemeStore {
         self.memes
             .iter()
             .rev()
-            .filter(|m| match settings.search_scope.as_str() {
-                "private_only" => m.user_id == user_id,
-                "public_only" => m.is_public,
-                _ => m.user_id == user_id || m.is_public,
-            })
+            .filter(|m| m.is_visible_to(user_id, &settings.search_scope))
             .take(limit)
             .collect()
     }
@@ -494,14 +621,10 @@ pub fn find_top_k<'a>(
         .filter(|w| w.len() >= 3)
         .collect();
     for meme in memes {
-        let is_visible = match scope_visible.as_str() {
-            "private_only" => meme.user_id == user_id,
-            "public_only" => meme.is_public,
-            _ => meme.user_id == user_id || meme.is_public,
-        };
-        if !is_visible {
+        if !meme.is_visible_to(user_id, &scope_visible) {
             continue;
-        }
+        };
+
         let sim_uk = cosine_similarity(query, &meme.embedding_uk).unwrap_or(0.0);
         let sim_en = cosine_similarity(query, &meme.embedding_en).unwrap_or(0.0);
         let mut best_score = f32::max(sim_uk, sim_en);

@@ -1,11 +1,12 @@
 use crate::AppState;
 use crate::config::AppConfig;
+use crate::db::BookMarkStatus;
 use crate::worker::MemeJob;
 use std::sync::Arc;
 use teloxide::prelude::*;
 use teloxide::types::{
     FileId, InlineQueryResult, InlineQueryResultCachedPhoto, InputFile, InputMedia,
-    InputMediaPhoto, Message, PhotoSize,
+    InputMediaPhoto, Message, MessageOrigin, PhotoSize,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -18,40 +19,67 @@ pub async fn handle_photo(
 ) -> ResponseResult<()> {
     let telegram_file_id = photo.file.id.0.clone();
     let telegram_file_unique_id = photo.file.unique_id.0.clone();
+    let user_id = msg.chat.id.0;
+    let caption = msg.caption().unwrap_or("").to_string();
 
-    let already_exist = {
-        let meme_store = state.meme_store.lock().await;
-        meme_store.conains_meme(&telegram_file_unique_id)
+    let (source_title, source_url) = match msg.forward_origin() {
+        Some(MessageOrigin::Channel {
+            date: _,
+            chat,
+            message_id,
+            author_signature: _,
+        }) => {
+            if let Some(username) = chat.username() {
+                let title = chat.title().unwrap_or(username).to_string();
+                let url = format!("https://t.me/{}/{}", username, message_id);
+                (title, url)
+            } else {
+                ("".to_string(), "".to_string())
+            }
+        }
+        _ => ("".to_string(), "".to_string()),
     };
 
-    if already_exist {
-        println!("\n--- [DUPLICATE MEME] ---");
-        println!(
-            "[INFO] Meme with unique ID [{}] already exists in DB",
-            telegram_file_unique_id
-        );
-        bot.send_message(
-            msg.chat.id,
-            "[Ї] I already have this meme in my database! 🧠",
-        )
-        .await?;
-        return Ok(());
-    }
+    let check_status = {
+        let mut meme_store = state.meme_store.lock().await;
+        meme_store.check_or_add_bookmark(&telegram_file_unique_id, user_id, &caption)
+    };
+
+    match check_status {
+        Ok(BookMarkStatus::AlreadyInCollection) => {
+            bot.send_message(msg.chat.id, "[V] This meme already in your collection!")
+                .await?;
+            return Ok(());
+        }
+        Ok(BookMarkStatus::AddetInstantly) => {
+            bot.send_message(msg.chat.id, "[V] We know your meme! Collected! ")
+                .await?;
+            return Ok(());
+        }
+        Ok(BookMarkStatus::NewMemeNeeded) => {
+            println!("[PHOTO-HANDLER]-[INFO] someone just drop new meme!")
+        }
+        Err(e) => {
+            eprintln!(
+                "[PHOTO-HANDLER]-[ERROR] Bookmark check error: {}",
+                e.to_string()
+            );
+        }
+    };
 
     let job = MemeJob {
         chat_id: msg.chat.id,
         file_id: telegram_file_id,
         file_unique_id: telegram_file_unique_id,
-        captions: msg
-            .caption()
-            .unwrap_or("no content from lazy user")
-            .to_string(),
+        captions: caption,
+        source_title: source_title,
+        source_url: source_url,
         retry_count: 0,
         user_id: msg.chat.id.0,
     };
 
     if let Err(e) = sender.send(job).await {
-        eprintln!("[ERROR] Queue error: {}", e);
+        eprintln!("[PHOTO-HANDLER]-[ERROR] Queue error: {}", e);
         bot.send_message(msg.chat.id, "Queue is full, please try again later!")
             .await?;
         return Ok(());
@@ -96,6 +124,11 @@ pub async fn handle_search(
                         InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
                     )
                     .caption(format!("📊 Match: {:.3} %", single_score))
+                    .caption(build_caption(
+                        &single_meme.source_title,
+                        &single_meme.source_url,
+                        &single_score,
+                    ))
                     .await
                 {
                     eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
@@ -110,7 +143,11 @@ pub async fn handle_search(
                             InputMediaPhoto::new(InputFile::file_id(FileId(
                                 meme.file_tg_id.clone(),
                             )))
-                            .caption(format!("📊 Match: {:.3}", score)),
+                            .caption(build_caption(
+                                &meme.source_title,
+                                &meme.source_url,
+                                &score,
+                            )),
                         )
                     })
                     .collect();
@@ -149,10 +186,17 @@ pub async fn handle_inline_query(
             .enumerate()
             .filter(|(_, meme)| !meme.file_tg_id.is_empty())
             .map(|(idx, meme)| {
-                InlineQueryResult::CachedPhoto(InlineQueryResultCachedPhoto::new(
-                    format!("{}_{}", meme.id, idx),
-                    FileId(meme.file_tg_id.clone()),
-                ))
+                InlineQueryResult::CachedPhoto(
+                    InlineQueryResultCachedPhoto::new(
+                        format!("{}_{}", meme.id, idx),
+                        FileId(meme.file_tg_id.clone()),
+                    )
+                    .caption(build_caption(
+                        &meme.source_title,
+                        &meme.source_url,
+                        &100.0,
+                    )),
+                )
             })
             .collect();
 
@@ -210,7 +254,11 @@ pub async fn handle_inline_query(
                         format!("{}_{}", meme.id, idx),
                         FileId(meme.file_tg_id.clone()),
                     )
-                    .caption(format!("📊 Match: {:.3}", score)),
+                    .caption(build_caption(
+                        &meme.source_title,
+                        &meme.source_url,
+                        &score,
+                    )),
                 )
             })
             .collect(),
@@ -230,4 +278,19 @@ pub async fn handle_inline_query(
     }
 
     Ok(())
+}
+
+pub fn build_caption(source_title: &str, source_url: &str, score: &f32) -> String {
+    let caption = if !source_url.is_empty() {
+        format!(
+            "📊 Match: {:.1}%\n => Source: [{}]({})",
+            score * 100.0,
+            source_title,
+            source_url
+        )
+    } else {
+        format!("📊 Match: {:.1}%", score * 100.0)
+    };
+
+    caption
 }

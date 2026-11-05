@@ -86,11 +86,18 @@ ALTER TABLE memes ADD COLUMN status TEXT NOT NULL DEFAULT 'approved'; -- 'pendin
 ALTER TABLE memes ADD COLUMN safety_score REAL DEFAULT 1.0;          -- 0.0 (NSFW) .. 1.0 (Safe)
 ```
 
-### 2.2. Search Scopes
-Users can toggle their search scope via `/settings` or inline buttons:
-1. **`all` (Default):** Search `(is_public = 1 AND status = 'approved') OR (user_id = CURRENT_USER)`. (All approved public memes + current user's private memes).
-2. **`private_only`:** Search strictly `user_id = CURRENT_USER AND is_public = 0`.
-3. **`public_only`:** Search strictly verified community memes (`is_public = 1 AND status = 'approved'`).
+### 2.3. Many-to-Many Architecture & Channel Forward Attribution (v0.2)
+* **Asset vs Bookmark Separation:**
+  * `memes`: Stores unique visual/semantic asset (vectors, OCR, Gemini description, channel attribution) strictly ONCE.
+  * `user_memes`: Relational join table mapping `user_id` $\leftrightarrow$ `meme_id` with per-user caption and personal `is_public` visibility.
+* **Instant Deduplication & Quota Protection:**
+  * When User B forwards a meme already uploaded by User A, the bot recognizes `file_tg_unique_id`.
+  * Bypasses Gemini VLM entirely (0 cost, 0 latency) and bookmarks it instantly into User B's collection.
+  * Eliminates duplicate search results entirely.
+* **Channel Attribution (Respecting Creators):**
+  * Safely detects `MessageOrigin::Channel` from forwarded posts with public `@username`.
+  * Generates direct link to original post (`https://t.me/{channel}/{message_id}`).
+  * Forwarded messages from private users (`MessageOrigin::User`) are strictly anonymized to prevent personal data leaks.
 
 ---
 
@@ -307,6 +314,9 @@ Meme ID: 1793041234
   - [x] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
   - [x] Multi-tenancy inline cache control (`is_personal = true`) & Async Debounce (500ms).
   - [x] BotFather inline configuration (`/setinline`).
+  - [ ] Many-to-Many meme ownership (`memes` $\leftrightarrow$ `user_memes` $\leftrightarrow$ `users`).
+  - [ ] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
+  - [ ] Instant deduplication: skip Gemini AI if meme already exists in catalog.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
