@@ -12,9 +12,18 @@ pub enum VlmError {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemeAnalysis {
+    #[serde(default)]
     pub is_nsfw: bool,
+    #[serde(alias = "text", alias = "extracted_text", default)]
     pub ocr_text: String,
+    #[serde(alias = "description_ukrainian", alias = "uk", default)]
     pub uk_description: String,
+    #[serde(
+        alias = "description_english",
+        alias = "description_en",
+        alias = "en",
+        default
+    )]
     pub en_description: String,
 }
 
@@ -47,6 +56,15 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
         [REJECTED_NSFW]
         OTHERWISE:
         Extract all text from this meme verbatim. Then briefly describe the scene, characters, and the joke context in both Ukrainian and English so it can be easily found by keywords.
+
+        SAFETY RULE:
+        Set 'is_nsfw': true ONLY if the image depicts explicitly exposed genitalia, bare breasts, or sexual intercourse.
+        Clothed people, adult/erotic jokes, innuendo, and underwear are SAFE ('is_nsfw': false).
+        JSON fields to return:
+        - 'is_nsfw': boolean
+        - 'ocr_text': exact verbatim text written on the meme (empty string if none)
+        - 'uk_description': describe the scene, characters, joke context, and key search keywords in Ukrainian.
+        - 'en_description': meme template name (e.g. 'thinking monkey', 'distracted boyfriend'), scene description, and key search keywords in English.
         ";
 
     let body = json!({
