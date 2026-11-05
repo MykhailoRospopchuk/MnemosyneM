@@ -22,7 +22,7 @@ impl ClipEngine {
 
         embed_vec
             .pop()
-            .ok_or_else(|| "embeding passage is empty".to_string())
+            .ok_or_else(|| "embedding passage is empty".to_string())
     }
 
     pub fn embed_query(&mut self, text: &str) -> Result<Vec<f32>, String> {
@@ -34,6 +34,6 @@ impl ClipEngine {
 
         embed_vec
             .pop()
-            .ok_or_else(|| "embeding query is empty".to_string())
+            .ok_or_else(|| "embedding query is empty".to_string())
     }
 }

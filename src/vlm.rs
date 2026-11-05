@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[derive(Debug)]
@@ -9,7 +10,15 @@ pub enum VlmError {
     Transient(String),
 }
 
-pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, VlmError> {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemeAnalysis {
+    pub is_nsfw: bool,
+    pub ocr_text: String,
+    pub uk_description: String,
+    pub en_description: String,
+}
+
+pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnalysis, VlmError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(25))
         .build()
@@ -52,6 +61,9 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
                 }
             ]
         }],
+        "generationConfig": {
+            "responseMimeType": "application/json"
+        },
         "safetySettings": [
             {
                 "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
@@ -80,6 +92,17 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
         .await
         .map_err(|e| VlmError::Transient(e.to_string()))?;
 
+    if !status.is_success() {
+        let err_msg = json_responce["error"]["message"]
+            .as_str()
+            .unwrap_or("Unknown Gemini API error");
+        eprintln!("[VLM ERROR] Google API returned {}: {}", status, err_msg);
+        return Err(VlmError::Transient(format!(
+            "Google API {}: {}",
+            status, err_msg
+        )));
+    }
+
     if let Some(candidate) = json_responce["candidates"].get(0) {
         if candidate["finishReason"].as_str() == Some("SAFETY") {
             println!(
@@ -92,18 +115,12 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
         }
     }
 
-    let description = json_responce["candidates"][0]["content"]["parts"][0]["text"]
+    let raw_text = json_responce["candidates"][0]["content"]["parts"][0]["text"]
         .as_str()
-        .ok_or_else(|| {
-            VlmError::Transient(format!(
-                "Invalid responce from Gemini: {:?}",
-                json_responce["candidates"][0]["finishMessage"]
-            ))
-        })?
-        .to_string();
+        .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
-    let lower = description.to_lowercase();
-    if description.contains("[REJECTED_NSFW]")
+    let lower = raw_text.to_lowercase();
+    if raw_text.contains("[REJECTED_NSFW]")
         || lower.contains("nsfw")
         || lower.contains("pornography")
         || lower.contains("порнографія")
@@ -119,6 +136,22 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<String, 
         ));
     }
 
+    let clean_json = raw_text
+        .trim()
+        .strip_prefix("```json")
+        .unwrap_or(raw_text)
+        .strip_prefix("```")
+        .unwrap_or(raw_text)
+        .strip_suffix("```")
+        .unwrap_or(raw_text)
+        .trim();
+    let analysis: MemeAnalysis = serde_json::from_str(clean_json)
+        .map_err(|e| VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text)))?;
+    if analysis.is_nsfw {
+        return Err(VlmError::InappropriateContent(
+            "NSFW explicit content detected".to_string(),
+        ));
+    }
     println!("[VLM] Sucessfully processed image in AI!");
-    Ok(description)
+    Ok(analysis)
 }

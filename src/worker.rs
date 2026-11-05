@@ -53,8 +53,7 @@ pub fn start_worker(
                 continue;
             }
 
-            let descriptions = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key)
-                .await
+            let analysis = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key).await
             {
                 Ok(desc) => desc,
                 Err(vlm::VlmError::InappropriateContent(reason)) => {
@@ -102,18 +101,22 @@ pub fn start_worker(
                 .unwrap()
                 .as_secs();
 
-            let full_title = format!("{} | {}", job.captions, descriptions);
+            let user_title = if job.captions == "no content from lazy user" {
+                "".to_string()
+            } else {
+                job.captions
+            };
 
             let mut engine = state.engine.lock().await;
             let mut meme_store = state.meme_store.lock().await;
 
-            match meme_store.add_from_descriptions(
+            match meme_store.add_from_analysis(
                 id,
-                full_title.clone(),
+                user_title,
+                &analysis,
                 job.file_id,
                 job.file_unique_id,
                 job.user_id,
-                descriptions,
                 &mut engine,
             ) {
                 Ok(()) => {
