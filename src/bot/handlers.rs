@@ -123,7 +123,6 @@ pub async fn handle_search(
                         msg.chat.id,
                         InputFile::file_id(FileId(single_meme.file_tg_id.clone())),
                     )
-                    .caption(format!("📊 Match: {:.3} %", single_score))
                     .caption(build_caption(
                         &single_meme.source_title,
                         &single_meme.source_url,
@@ -194,7 +193,7 @@ pub async fn handle_inline_query(
                     .caption(build_caption(
                         &meme.source_title,
                         &meme.source_url,
-                        &100.0,
+                        &1.0,
                     )),
                 )
             })

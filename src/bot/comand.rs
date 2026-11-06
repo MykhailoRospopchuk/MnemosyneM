@@ -11,6 +11,7 @@ use teloxide::types::Message;
 use teloxide::utils::command::BotCommands;
 
 use crate::AppState;
+use crate::bot::handlers::build_caption;
 use crate::db::UserSetting;
 
 #[derive(BotCommands, Clone)]
@@ -83,7 +84,10 @@ pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Mess
                     msg.chat.id,
                     InputFile::file_id(FileId(meme.file_tg_id.clone())),
                 )
-                .caption(format!("🎲 Random meme"))
+                .caption(format!(
+                    "🎲 Random meme | {}",
+                    build_caption(&meme.source_title, &meme.source_url, &1.0)
+                ))
                 .await?;
         } else {
             message = bot

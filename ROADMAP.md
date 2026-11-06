@@ -314,9 +314,9 @@ Meme ID: 1793041234
   - [x] `InlineQueryResultCachedPhoto` instant delivery using cached `file_id`.
   - [x] Multi-tenancy inline cache control (`is_personal = true`) & Async Debounce (500ms).
   - [x] BotFather inline configuration (`/setinline`).
-  - [ ] Many-to-Many meme ownership (`memes` $\leftrightarrow$ `user_memes` $\leftrightarrow$ `users`).
-  - [ ] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
-  - [ ] Instant deduplication: skip Gemini AI if meme already exists in catalog.
+  - [x] Many-to-Many meme ownership (`memes` $\leftrightarrow$ `user_memes` $\leftrightarrow$ `users`).
+  - [x] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
+  - [x] Instant deduplication: skip Gemini AI if meme already exists in catalog.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
