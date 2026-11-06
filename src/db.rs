@@ -229,7 +229,7 @@ impl MemeStore {
                 public += 1;
             }
 
-            if m.is_owned_by(user_id) {
+            if m.is_owned_by(user_id) && !m.is_public {
                 private += 1;
             }
         }
