@@ -1,8 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use crate::AppState;
 use crate::config::AppConfig;
 use crate::vlm;
+use crate::{AppState, helpers::hash_helper::compute_hash};
 use teloxide::{
     Bot,
     net::Download,
@@ -54,6 +54,17 @@ pub fn start_worker(
                 eprintln!("[WORKER]-[ERROR] Failed to download image: {}", e);
                 continue;
             }
+
+            let phash = match compute_hash(&image_bytes) {
+                Ok(phash) => phash,
+                Err(e) => {
+                    eprintln!(
+                        "[WORKER]-[WARN] Failed to compute hash for image: {}",
+                        e.to_string()
+                    );
+                    0
+                }
+            };
 
             let analysis = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key).await
             {
@@ -125,6 +136,7 @@ pub fn start_worker(
                 job.source_title,
                 job.source_url,
                 &mut engine,
+                phash,
             ) {
                 Ok(()) => {
                     println!("[WORKER] Sucessfully saved in SQLite!");

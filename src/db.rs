@@ -17,6 +17,7 @@ pub struct Meme {
     pub source_url: String,
     pub is_public: bool,
     pub owners: Vec<i64>,
+    pub phash: u64,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMeme {
@@ -131,6 +132,7 @@ impl MemeStore {
         source_title: String,
         source_url: String,
         engine: &mut ClipEngine,
+        phash: u64,
     ) -> Result<(), String> {
         let passage_uk = format!("{} | {}", analysis.ocr_text, analysis.uk_description);
         let passage_en = format!("{} | {}", analysis.ocr_text, analysis.en_description);
@@ -157,9 +159,9 @@ impl MemeStore {
                 "INSERT INTO memes (
                     id, title, ocr_text, description_uk, description_en,
                     embedding_uk, embedding_en,
-                    file_tg_id, file_tg_unique_id, source_title, source_url
+                    file_tg_id, file_tg_unique_id, source_title, source_url, phash
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (file_tg_unique_id)
                 DO UPDATE SET
                     title = excluded.title,
@@ -169,7 +171,8 @@ impl MemeStore {
                     embedding_uk = excluded.embedding_uk,
                     embedding_en = excluded.embedding_en,
                     source_title = excluded.source_title,
-                    source_url = excluded.source_url ;",
+                    source_url = excluded.source_url,
+                    phash = excluded.phash ;",
                 params![
                     id,
                     title,
@@ -181,7 +184,8 @@ impl MemeStore {
                     file_tg_id,
                     file_tg_unique_id,
                     source_title,
-                    source_url
+                    source_url,
+                    phash
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -205,6 +209,7 @@ impl MemeStore {
             source_url,
             is_public,
             owners: vec![user_id],
+            phash,
         };
 
         if let Some(item) = self
@@ -289,7 +294,8 @@ impl MemeStore {
                 file_tg_id TEXT NOT NULL UNIQUE,
                 file_tg_unique_id TEXT NOT NULL UNIQUE,
                 source_title TEXT NOT NULL DEFAULT '',
-                source_url TEXT NOT NULL DEFAULT ''
+                source_url TEXT NOT NULL DEFAULT '',
+                phash BIGINT NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -315,7 +321,7 @@ impl MemeStore {
         .map_err(|e| e.to_string())?;
 
         let mut stmt = conn
-                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, source_title, source_url FROM memes")
+                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, source_title, source_url, phash FROM memes")
                     .map_err(|e| e.to_string())?;
         let meme_iter = stmt
             .query_map([], |row| {
@@ -328,6 +334,8 @@ impl MemeStore {
                 let file_tg_unique_id: String = row.get(6)?;
                 let source_title: String = row.get(7)?;
                 let source_url: String = row.get(8)?;
+                let phash_raw: i64 = row.get(9)?;
+                let phash: u64 = phash_raw as u64;
                 Ok(Meme {
                     id,
                     title,
@@ -340,6 +348,7 @@ impl MemeStore {
                     source_url,
                     is_public: false,
                     owners: vec![],
+                    phash,
                 })
             })
             .map_err(|e| e.to_string())?;

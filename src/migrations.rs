@@ -18,6 +18,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
 
     recalculate_embeddings(&mut conn, engine)?;
+    add_hash_column_to_memes(&mut conn)?;
 
     Ok(())
 }
@@ -99,6 +100,68 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    println!("[MIGRATION] Successfully finished! All embeddings updated.");
+    println!(
+        "[MIGRATION] - {}: Successfully finished! All embeddings updated.",
+        migratin_name
+    );
+    Ok(())
+}
+
+fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1794117305_add_hash_to_memes".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    println!(
+        "[MIGRATION] - {}: Adding hash column to memes table for computed hash value...",
+        migration_name
+    );
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memes)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_hash = false;
+    for column in columns.flatten() {
+        if column == "phash" {
+            has_hash = true;
+            break;
+        }
+    }
+
+    drop(stmt);
+
+    if !has_hash {
+        conn.execute(
+            "ALTER TABLE memes ADD COLUMN phash BIGINT NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?1, ?2)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
     Ok(())
 }

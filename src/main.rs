@@ -2,6 +2,7 @@ mod bot;
 mod config;
 mod db;
 mod engine;
+mod helpers;
 mod migrations;
 mod vlm;
 mod worker;
