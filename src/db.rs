@@ -185,7 +185,7 @@ impl MemeStore {
                     file_tg_unique_id,
                     source_title,
                     source_url,
-                    phash
+                    phash as i64
                 ],
             )
             .map_err(|e| e.to_string())?;
