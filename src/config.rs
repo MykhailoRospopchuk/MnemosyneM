@@ -2,11 +2,13 @@ use std::env;
 use std::sync::OnceLock;
 
 const TOP_K: usize = 3;
+const MAX_PHASH_DISTANCE: u32 = 5;
 
 pub struct AppConfig {
     pub db_path: String,
     pub top_k: usize,
     pub gemini_api_key: String,
+    pub max_phash_distance: u32,
 }
 
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -34,5 +36,9 @@ pub fn load_config() -> &'static AppConfig {
             .parse::<usize>()
             .unwrap_or(TOP_K),
         gemini_api_key: env::var("GEMINI_API_KEY").expect("Couldn't read GEMINI_API_KEY"),
+        max_phash_distance: env::var("MAX_PHASH_DISTANCE")
+            .expect("Couldn't read MAX_PHASH_DISTANCE")
+            .parse::<u32>()
+            .unwrap_or(MAX_PHASH_DISTANCE),
     })
 }

@@ -65,7 +65,7 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     {
         let mut update_stmt = tx
-            .prepare("UPDATE memes SET embedding_uk = ?1, embedding_en = ?2 WHERE id = ?3")
+            .prepare("UPDATE memes SET embedding_uk = ?, embedding_en = ? WHERE id = ?")
             .map_err(|e| e.to_string())?;
         for (idx, (id, ocr_text, desc_uk, desc_en)) in memes_to_update.into_iter().enumerate() {
             let passage_uk = if ocr_text.is_empty() {
@@ -95,7 +95,7 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
         .unwrap_or_default()
         .as_secs();
     tx.execute(
-        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
         params![migratin_name, now],
     )
     .map_err(|e| e.to_string())?;
@@ -109,6 +109,7 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
 
 fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
     let migration_name = "1794117305_add_hash_to_memes".to_string();
+    let force_recalculation = std::env::var("RECALCULATE_HASH").is_ok();
 
     let already_applied: bool = conn
         .query_row(
@@ -118,7 +119,7 @@ fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
         )
         .unwrap_or(false);
 
-    if already_applied {
+    if already_applied && !force_recalculation {
         return Ok(());
     }
 
@@ -157,7 +158,7 @@ fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
         .unwrap_or_default()
         .as_secs();
     conn.execute(
-        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?1, ?2)",
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
         params![migration_name, now],
     )
     .map_err(|e| e.to_string())?;

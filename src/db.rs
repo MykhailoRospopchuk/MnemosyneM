@@ -583,6 +583,76 @@ impl MemeStore {
     ) -> Vec<(&Meme, f32)> {
         find_top_k(query, query_text, &self.memes, k, user_id, scope_visibility)
     }
+
+    pub fn find_duplicate_by_path(
+        &self,
+        target_phash: u64,
+        max_distance: u32,
+    ) -> Option<(u64, u32)> {
+        let mut best_match: Option<(u64, u32)> = None;
+
+        for meme in &self.memes {
+            if meme.phash == 0 {
+                continue;
+            }
+
+            let distance = (meme.phash ^ target_phash).count_ones();
+            if distance <= max_distance {
+                match best_match {
+                    Some((_, best_dist)) if distance < best_dist => {
+                        best_match = Some((meme.id, distance));
+                    }
+                    None => {
+                        best_match = Some((meme.id, distance));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        best_match
+    }
+
+    pub fn link_exiting_meme(
+        &mut self,
+        meme_id: u64,
+        user_id: i64,
+        user_caption: &str,
+    ) -> Result<bool, String> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let is_public = self.get_user_settings(user_id).upload_as_public;
+        let mut is_new = false;
+
+        self.conn
+            .execute(
+                "
+            INSERT INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, meme_id) DO UPDATE
+            SET
+                user_captions = EXCLUDED.user_captions,
+                is_public = EXCLUDED.is_public
+                ",
+                params![user_id, meme_id, user_caption, is_public, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            if !meme.owners.contains(&user_id) {
+                meme.owners.push(user_id);
+                is_new = true;
+            }
+            if is_public {
+                meme.is_public = true;
+            }
+        }
+
+        Ok(is_new)
+    }
 }
 
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {

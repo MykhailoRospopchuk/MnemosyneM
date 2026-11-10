@@ -72,6 +72,24 @@ flowchart TD
   * Send all worker responses via `.reply_to_message_id(job.message_id)`.
   * Tapping the bot's response in Telegram jumps straight to the exact uploaded photo.
 
+### 1.4. Native Persistent Reply Keyboard (Нижня клавіатура швидких дій)
+* **Problem:** Requiring users to type slash commands (`/random`, `/tinder`, `/tags`, `/settings`) or open the burger menu slows down interaction and hurts mobile UX.
+* **Solution:** Provide a persistent Telegram Reply Keyboard (`teloxide::types::KeyboardMarkup`) directly beneath the input field with clean emoji icons and organized rows:
+  ```text
+  +---------------------------------------+
+  |        🔥 Мем-Тіндер (/tinder)        |
+  +-------------------+-------------------+
+  | 🎲 Випадковий мем |  ❤️ Вподобані     |
+  +-------------------+-------------------+
+  | 🏷️ Теги/Категорії |  ⚙️ Налаштування  |
+  +-------------------+-------------------+
+  |            📊 Статистика              |
+  +---------------------------------------+
+  ```
+* **Implementation Details:**
+  * Created via `KeyboardMarkup::new(...)` with `.resize_keyboard(true)` and `.persistent()`.
+  * Dispatcher transparently handles button text triggers as equivalent to slash commands.
+
 ---
 
 ## 🔒 Milestone 2: Multi-Tenancy & Privacy (Public vs Private) (v0.2)
@@ -435,6 +453,10 @@ Meme ID: 1793041234
     - [ ] Interactive `/tinder` UI: send photo with single-row layout: equal-sized `[ ❤️ Лайк ]` & `[ ⏭️ Скіп ]` and smaller `[ 👎 ]` in the middle.
     - [ ] Zero chat spam: update next meme in-place via `edit_message_media`.
     - [ ] Decouple Likes from Personal Collection: likes populate `/liked` feed without cluttering personal `user_memes`.
+  - [ ] Persistent Reply Keyboard (`KeyboardMarkup`):
+    - [ ] Build multi-row keyboard with `resize_keyboard(true)` and `persistent()` for one-tap thumb navigation.
+    - [ ] Buttons: `🔥 Мем-Тіндер`, `🎲 Випадковий мем`, `❤️ Вподобані`, `🏷️ Теги/Категорії`, `⚙️ Налаштування`, `📊 Статистика`.
+    - [ ] Map button text directly into bot command dispatcher.
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.

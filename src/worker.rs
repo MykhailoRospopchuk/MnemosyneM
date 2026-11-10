@@ -66,6 +66,40 @@ pub fn start_worker(
                 }
             };
 
+            if phash != 0 {
+                let mut store = state.meme_store.lock().await;
+
+                if let Some((exiting_meme_id, distance)) =
+                    store.find_duplicate_by_path(phash, app_config.max_phash_distance)
+                {
+                    println!(
+                        "[WORKER] Duplicate meme detected by pHash. Matched meme [{}] | distance [{distance}])! Skipping Gemini VLM",
+                        exiting_meme_id
+                    );
+
+                    match store.link_exiting_meme(exiting_meme_id, job.user_id, &job.captions) {
+                        Ok(is_new_for_user) => {
+                            let text = if is_new_for_user {
+                                "[D] This meme already persist in DB (> 92%)! Added immediattely to your collection"
+                            } else {
+                                "[E] Already exist in your collection"
+                            };
+
+                            let _ = bot.send_message(job.chat_id, text).await;
+                        }
+                        Err(e) => {
+                            eprintln!("[WORKER]-[ERROR] Failed to ling duplicate meme: {}", e)
+                        }
+                    }
+
+                    drop(store);
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    continue;
+                }
+
+                drop(store);
+            }
+
             let analysis = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key).await
             {
                 Ok(desc) => desc,
@@ -76,7 +110,7 @@ pub fn start_worker(
                     );
                     let _ = bot.send_message(
                             job.chat_id,
-                            format!("⛔ [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!", reason),
+                            format!("[X] [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!", reason),
                         )
                         .await;
                     tokio::time::sleep(Duration::from_secs(4)).await;
