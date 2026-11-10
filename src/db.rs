@@ -653,6 +653,29 @@ impl MemeStore {
 
         Ok(is_new)
     }
+
+    pub fn get_unhashed_memes(&self) -> Vec<(u64, String)> {
+        self.memes
+            .iter()
+            .filter(|m| m.phash == 0)
+            .map(|m| (m.id, m.file_tg_id.clone()))
+            .collect()
+    }
+
+    pub fn update_phash(&mut self, meme_id: u64, phash: u64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE memes SET phash = ? WHERE id = ?",
+                params![phash as i64, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            meme.phash = phash;
+        }
+
+        Ok(())
+    }
 }
 
 pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {

@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod engine;
 mod helpers;
+mod maintenance;
 mod migrations;
 mod vlm;
 mod worker;
@@ -11,6 +12,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use teloxide::Bot;
 use tokio::sync::Mutex;
+
+use crate::maintenance::maintance_worker;
 
 struct AppState {
     meme_store: Mutex<db::MemeStore>,
@@ -47,6 +50,8 @@ async fn main() {
         bot.clone(),
         app_config,
     );
+
+    maintance_worker::start_maintenance(Arc::clone(&state), bot.clone());
 
     println!("Let's get it started");
 
