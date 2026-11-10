@@ -51,28 +51,22 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
     );
 
     let prompt = "
-        You are a meme indexing engine with strict pornography protection.
-        SAFETY RULE:
-        Only reject the image if it contains EXPLICIT, UNCLOTHED human nudity:
-        - Exposed genitalia (naked penis, vulva/vagina, anus)
-        - Bare female breasts/nipples
-        - Direct sexual intercourse
-        CRITICAL INSTRUCTIONS:
-        - Fully clothed or partially clothed people, underwear, bikinis, suggestive poses, romantic hugs, and adult/erotic jokes or innuendo in memes are SAFE.
-        - If the image contains text, humor, and people in clothes — IT IS A VALID MEME, DO NOT REJECT IT!
-        If and ONLY if the image depicts explicitly exposed genitalia, bare breasts, or sexual intercourse, reply EXACTLY with:
-        [REJECTED_NSFW]
-        OTHERWISE:
-        Extract all text from this meme verbatim. Then briefly describe the scene, characters, and the joke context in both Ukrainian and English so it can be easily found by keywords.
+        You are a meme indexing engine.
 
-        SAFETY RULE:
-        Set 'is_nsfw': true ONLY if the image depicts explicitly exposed genitalia, bare breasts, or sexual intercourse.
-        Clothed people, adult/erotic jokes, innuendo, and underwear are SAFE ('is_nsfw': false).
+        SAFETY RULES:
+        1. ART, DRAWINGS & SATIRE ARE ALWAYS SAFE:
+            Medieval illuminations, historical paintings, frescoes, statues, cartoons, comics, sketches, caricatures, and drawn art are CULTURAL HERITAGE, ART & HUMOR.
+            Set 'is_nsfw': false for ALL drawings, medieval art, paintings, and caricatures regardless of any anatomical humor.
+        2. REAL-LIFE PHOTOGRAPHIC NUDITY ONLY:
+            Set 'is_nsfw': true ONLY for REAL-LIFE PHOTOGRAPHS depicting explicit human genitalia or direct real-life sexual acts.
+        3. Erotic jokes, wordplay, double entendres, underwear, and suggestive memes are SAFE ('is_nsfw': false).
+        TASK:
+        Extract all text from this meme verbatim. Then briefly describe the scene, characters, and the joke context in both Ukrainian and English so it can be easily found by keywords.
         JSON fields to return:
-        - 'is_nsfw': boolean
+        - 'is_nsfw': boolean (false for all drawings, art, memes, and caricatures; true ONLY for real-life photographic pornography)
         - 'ocr_text': exact verbatim text written on the meme (empty string if none)
         - 'uk_description': describe the scene, characters, joke context, and key search keywords in Ukrainian.
-        - 'en_description': meme template name (e.g. 'thinking monkey', 'distracted boyfriend'), scene description, and key search keywords in English.
+        - 'en_description': meme template name, scene description, and key search keywords in English.
         ";
 
     let body = json!({

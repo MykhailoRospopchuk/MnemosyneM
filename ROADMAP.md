@@ -18,6 +18,7 @@ flowchart TD
         Queue["MPSC Background Queue (15 RPM / 500 RPD)"]
         Privacy["Public vs Private Memes & Search Scopes"]
         Inline["Telegram Inline Mode (@bot query anywhere)"]
+        Logging["Structured Logging (tracing + timestamps + user attribution)"]
     end
 
     subgraph M3 ["v0.3: Content Moderation & Admin"]
@@ -63,6 +64,13 @@ flowchart TD
   🎯 <Meme Title or Joke Punchline>
   📊 Match: 92%
   ```
+
+### 1.3. Batch Ingestion & Message Attribution (Reply-to-Message UX)
+* **Problem:** When users send/forward batches of 10–30 memes at once, asynchronous worker notifications (`[V] Confiscated`, `⛔ [REJECTED]`) come without referencing the source message, leaving users confused about which meme succeeded or failed.
+* **Solution:**
+  * Add `message_id: MessageId` to `MemeJob`.
+  * Send all worker responses via `.reply_to_message_id(job.message_id)`.
+  * Tapping the bot's response in Telegram jumps straight to the exact uploaded photo.
 
 ---
 
@@ -143,6 +151,31 @@ Telegram provides native support for **Inline Bots** (`InlineQuery`):
 * **Group Chat Invocations (Bonus):**
   * Bot can also be added directly to group chats where members can trigger it via `/search <query>` or by replying to/mentioning the bot (`@MnemosyneM_bot`).
 
+### 3.3. Hashtags & Category Directory (`/tags`)
+* **Goal:** Allow users to browse indexed memes by categories and see meme counts per tag.
+* **UX Flow:**
+  1. User sends `/tags`.
+  2. Bot responds with ranked list of tags + total count of memes:
+     ```text
+     🏷️ Meme Categories & Tags:
+     • #work (42 memes)
+     • #programming (38 memes)
+     • #relationship (25 memes)
+     • #cats (19 memes)
+     • #deadline (14 memes)
+     ```
+  3. Interactive Inline Buttons allow one-tap jumping straight into inline search (`@MnemosyneM_bot #tag `).
+* **Database & Indexing:**
+  * Gemini VLM extracts 2–4 lowercase normalized tags per meme into `tags` and `meme_tags` join table.
+  * Fast SQL aggregation:
+    ```sql
+    SELECT t.name, COUNT(mt.meme_id) AS total_memes
+    FROM tags t
+    JOIN meme_tags mt ON t.id = mt.tag_id
+    GROUP BY t.id
+    ORDER BY total_memes DESC;
+    ```
+
 ---
 
 ## 🛡️ Milestone 4: Content Moderation & NSFW Protection (v0.3)
@@ -199,6 +232,19 @@ flowchart TD
     Quarantine --> AdminReview
 ```
 
+### 4.3. Rejection Transparency & Clear User Feedback
+* **Problem:** When Gemini rejects an image during batch uploads (e.g. `Inappropriate content detected (Gemini Safety Filter Explicit/NSFW)`), the user receives a generic error message with no context. If 20 memes were forwarded, it's impossible to deduce which meme triggered the safety filter.
+* **Requirements & Implementation:**
+  1. **Direct Telegram Reply:**
+     * Use `reply_to_message_id(job.message_id)` so the rejection message is directly attached as a quote to the offending meme in the chat history.
+  2. **Clear Rejection Message:**
+     ```text
+     ⛔ [REJECTED] Inappropriate content detected: Explicit/NSFW filter triggered.
+     NSFW or sensitive content is strictly prohibited!
+     ```
+  3. **Visual Reference (Safe Fallback):**
+     * If the message reply link is insufficient (e.g., deleted message or external forwarding context), include the file preview or the original caption to unambiguously identify the rejected item.
+
 ---
 
 ## 👑 Milestone 5: Telegram-Native Admin Panel (v0.3)
@@ -233,7 +279,55 @@ Meme ID: 1793041234
 
 ---
 
-## 🚀 Milestone 7: High-Performance Vector Engine from Scratch (v0.4)
+## 🪵 Milestone 7: Production Observability, Logging & Runtime Metrics (v0.2 / v0.3)
+> **Goal:** Transition from raw, anonymous `println!` console output to production-grade structured logging (`tracing`) and in-process runtime resource metrics.
+
+### 7.1. Problem & Current Pain Points
+* **No Timestamps:** Logs lack temporal context (`[PHOTO-HANDLER]-[INFO] someone just drop new meme!`), making it impossible to diagnose when requests occurred, how long queues take, or track rate limits.
+* **Anonymous Actions:** Logs do not indicate which user initiated the action (`user_id`, `@username`), complicating debugging when users batch-upload files or trigger errors.
+* **Console Noise & Inflexibility:** Unstructured stdout floods the terminal with identical lines instead of level-filtered (`INFO`, `WARN`, `ERROR`), query-searchable events.
+* **Lack of Resource Visibility:** Developers have no visibility into bot memory footprint (FastEmbed ONNX models, vector arrays), queue congestion, or Gemini API quota exhaustion during runtime.
+
+### 7.2. Architecture with `tracing` & `tracing-subscriber`
+* **Crate Dependencies:** `tracing = "0.1"` and `tracing-subscriber = { version = "0.3", features = ["env-filter", "time"] }`.
+* **Standardized Log Format:**
+  ```text
+  2026-11-09T15:38:04.123Z  INFO photo_handler: New meme received user_id=98765432 username=@johndoe file_unique_id=AQADzxx...
+  2026-11-09T15:38:08.456Z  WARN worker: Gemini safety filter rejected meme user_id=98765432 file_unique_id=AQADzxx... reason="Explicit/NSFW"
+  2026-11-09T15:38:12.789Z  INFO search_handler: Search query executed user_id=98765432 username=@johndoe query="звільнення з роботи" results=3 latency_ms=42
+  ```
+* **Environment-driven Log Control:** Configure via `RUST_LOG=info,m_nemosyne_m=debug` for zero-overhead production runs and granular local debugging.
+
+### 7.3. In-Process Resource Metrics & System Health Dashboard
+* **Is pulling metrics directly from runtime a good practice?**
+  * **Yes, it is industry best practice.** In-process metrics incur near-zero overhead (nanoseconds on Linux via `/proc/self/statm`) and expose internal application states that external system tools (`htop`, `docker stats`) cannot see.
+* **Core Metrics Tracked:**
+  1. **OS / Process Level:**
+     * Resident Set Size (RSS Memory) & Virtual Memory (`/proc/self/statm` on Linux).
+     * Process Uptime (`start_time.elapsed()`).
+  2. **Application & Queue Internals:**
+     * MPSC Queue depth (`receiver.len()` vs channel capacity).
+     * SQLite database disk footprint (bytes) and total indexed memes count.
+     * Gemini Free Tier Quotas: daily requests consumed ($X / 500$ RPD) and current rate-limiter pacing.
+  3. **Performance & Latency:**
+     * FastEmbed ONNX inference latency (ms).
+     * Vector search execution time ($k$-NN scan / cosine similarity duration in ms).
+* **Delivery Interfaces:**
+  * **Enhanced Telegram `/stats` Dashboard:**
+    ```text
+    📊 MnemosyneM Runtime Metrics:
+    ⏱ Uptime: 4d 12h 35m
+    🧠 RAM (RSS): 184 MB | Peak: 240 MB
+    💾 SQLite DB: 4.5 MB (1,420 memes)
+    📥 Ingestion Queue: 0 pending / 500 max
+    ⚡ Gemini API Quota: 142 / 500 RPD (28%)
+    🎯 Avg Search Latency: 28 ms (Embed: 22ms, Search: 6ms)
+    ```
+  * *(Future)* Prometheus `/metrics` exporter endpoint if deployed in containerized clusters.
+
+---
+
+## 🚀 Milestone 8: High-Performance Vector Engine from Scratch (v0.4)
 > **Target:** Senior Systems Rust / High-Performance Engineering Portfolio Piece.
 
 ### 🎯 Portfolio Elevator Pitch for CV:
@@ -241,7 +335,7 @@ Meme ID: 1793041234
 
 ---
 
-### 7.1. SIMD AVX2 / FMA Vector Math Kernel
+### 8.1. SIMD AVX2 / FMA Vector Math Kernel
 * **Current State:** Scalar iterator `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`.
 * **SIMD Architecture:**
   * Uses 256-bit `YMM` registers via `core::arch::x86_64`.
@@ -255,7 +349,7 @@ Meme ID: 1793041234
 
 ---
 
-### 7.2. HNSW (Hierarchical Navigable Small World) Graph Index
+### 8.2. HNSW (Hierarchical Navigable Small World) Graph Index
 * **Current State:** Brute-force Flat KNN ($O(N)$ linear scan over all memes).
 * **HNSW Architecture:**
   * Multi-layer skip-list inspired graph of vector nodes:
@@ -268,7 +362,7 @@ Meme ID: 1793041234
 
 ---
 
-### 7.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
+### 8.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
 * **Current State:** 3072-byte Little-Endian BLOBs stored inside SQLite rows.
 * **New Storage Engine (`.vec` format):**
   * Dedicated append-only binary vector file with structured header:
@@ -286,7 +380,7 @@ Meme ID: 1793041234
 
 ---
 
-### 7.4. Scalar Quantization (SQ8) *(Optional Optimization)*
+### 8.4. Scalar Quantization (SQ8) *(Optional Optimization)*
 * Compresses 32-bit float vectors (`f32`, 3072 bytes per vector) into 8-bit unsigned integers (`u8`, 768 bytes per vector).
 * Achieves **75% RAM reduction** while maintaining $>98\%$ recall accuracy.
 * Enables integer SIMD instructions (`_mm256_maddubs_epi16`).
@@ -318,9 +412,33 @@ Meme ID: 1793041234
   - [x] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
   - [x] Instant deduplication: skip Gemini AI if meme already exists in catalog.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
+  - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
+  - [ ] Production structured logging (`tracing` + `tracing-subscriber`):
+    - [ ] Replace raw `println!` / `eprintln!` across `handlers`, `worker`, `vlm`, and `engine`.
+    - [ ] Add UTC timestamps to every log line to track when actions happen.
+    - [ ] Add user context (`user_id`, `@username`, `chat_id`) to photo ingestion, queue worker, and search queries.
+    - [ ] Configure log-level filtering (`INFO`, `WARN`, `ERROR`, `DEBUG`) via `RUST_LOG` environment variable.
+  - [ ] In-process runtime resource metrics & health dashboard (`/stats`):
+    - [ ] Measure process memory (RSS / Virtual RAM via `/proc/self/statm` on Linux).
+    - [ ] Track bot process uptime (`Instant::now().elapsed()`).
+    - [ ] Report live MPSC queue backlog depth and SQLite DB file size.
+    - [ ] Track Gemini Free Tier quotas consumed (RPD counter & RPM pacing).
+    - [ ] Measure vector search execution latency (ms) and FastEmbed inference time.
+  - [ ] Automatic meme categorization & Hashtag directory (`/tags`):
+    - [ ] Prompt Gemini VLM to extract 2–4 normalized tags/categories per meme.
+    - [ ] Create SQLite tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
+    - [ ] Implement `/tags` command displaying all categories with live meme counts (`#category (N)`).
+    - [ ] Add interactive Inline buttons on `/tags` to trigger one-tap inline search for selected tag.
+    - [ ] Support combined tag filtering in inline queries (`@MnemosyneM_bot #work deadline`).
+  - [ ] Native Telegram Meme Tinder & Reactions (`/tinder`):
+    - [ ] SQLite schema `user_reactions (user_id, meme_id, reaction, created_at)` for `'like'`, `'skip'`, `'dislike'`.
+    - [ ] Interactive `/tinder` UI: send photo with single-row layout: equal-sized `[ ❤️ Лайк ]` & `[ ⏭️ Скіп ]` and smaller `[ 👎 ]` in the middle.
+    - [ ] Zero chat spam: update next meme in-place via `edit_message_media`.
+    - [ ] Decouple Likes from Personal Collection: likes populate `/liked` feed without cluttering personal `user_memes`.
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
+  - [ ] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**
   - [ ] Criterion micro-benchmarks suite for 768-dim vector cosine similarity.
