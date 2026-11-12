@@ -18,6 +18,10 @@ flowchart TD
         Queue["MPSC Background Queue (15 RPM / 500 RPD)"]
         Privacy["Public vs Private Memes & Search Scopes"]
         Inline["Telegram Inline Mode (@bot query anywhere)"]
+        pHash["pHash Visual Deduplication (image_hasher POPCNT)"]
+        Maintenance["Autonomous Maintenance Worker (Background pHash backfill)"]
+        VlmPool["Multi-Model VLM Pool Failover (503/429 auto-switch)"]
+        Drip["Meme Drip Delivery (Randomized dopamine scheduler)"]
         Logging["Structured Logging (tracing + timestamps + user attribution)"]
         Resilience["Startup & Network Resilience (retry loops, non-fatal command setup, token masking)"]
         GIFs["GIF & Animation Support (Telegram MP4 + Gemini Video VLM)"]
@@ -126,6 +130,56 @@ ALTER TABLE memes ADD COLUMN safety_score REAL DEFAULT 1.0;          -- 0.0 (NSF
   * Safely detects `MessageOrigin::Channel` from forwarded posts with public `@username`.
   * Generates direct link to original post (`https://t.me/{channel}/{message_id}`).
   * Forwarded messages from private users (`MessageOrigin::User`) are strictly anonymized to prevent personal data leaks.
+
+### 2.4. Perceptual Hashing (pHash) & Background Maintenance Worker (v0.2)
+* **Visual Deduplication Independent of Resolution:**
+  * Uses `image_hasher` (64-bit gradient/perceptual hash) to identify visually identical memes regardless of dimensions, JPEG compression, or file format (`.jpg`, `.png`, `.webp`).
+  * Bitwise Hamming distance comparison: $(h_1 \oplus h_2)\text{.count\_ones}() \le \text{MAX\_PHASH\_DISTANCE}$ (configurable threshold, default $\le 5$).
+  * Compiles to native CPU `POPCNT` instruction for sub-microsecond vector scans across the entire in-memory catalog.
+* **Pre-VLM Short-Circuit:**
+  * New uploads are hashed immediately after downloading image bytes. If an existing meme is matched:
+    * Skips Google Gemini VLM call entirely (0s latency, 0 quota consumed).
+    * Links the existing meme into the user's `user_memes` collection in-place.
+* **Autonomous Background Maintenance Worker (`src/maintenance/`):**
+  * Decoupled from blocking startup migrations; starts in its own Tokio async loop with recurring timer (`interval(600s)` / 10–50 min).
+  * Automatically backfills `phash` for legacy catalog memes where `phash == 0` via non-blocking Telegram Bot API requests.
+  * Preserves low latency on `Mutex<MemeStore>`: drops the lock during network downloads, only acquiring it for microsecond in-memory/SQLite updates.
+* **Multi-Model VLM Fallback Pool (`GEMINNI_MODEL_POOL`):**
+  * Resilient failover pool: `["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3.6-flash", "gemini-3.8-flash"]`.
+  * Automatically switches to backup model upon encountering HTTP 503 (high demand spikes) or HTTP 429 (quota rate limits).
+* **Nuanced Content Moderation:**
+  * Strict pornography protection for real-life photographic nudity.
+  * Explicit exemptions for historical art, medieval illuminations, frescoes, statues, caricatures, and satirical drawings.
+
+### 2.5. Meme Drip Delivery & Autonomous Dopamine Scheduler (v0.2 / v0.3)
+* **Concept & Psychology:**
+  * Users configure a subscription: bot delivers $K$ random high-scoring memes per day over $N$ days at **unpredictable, randomized intervals**.
+  * Unlike spammy fixed-interval timers (e.g. every 30 minutes), unpredictable random drops trigger a dopamine hit similar to an unexpected message from a friend.
+* **Architecture & Algorithms:**
+  * **Jitter / Poisson Interval:** Next delivery timestamp is scheduled dynamically:
+    $$\text{next\_delivery} = \text{now} + \text{Uniform}(\text{min\_interval}, \text{max\_interval})$$
+  * **Quiet Hours Guard (Нічний режим):** Strictly halts deliveries during nighttime (default `23:00` – `09:00` user local time or UTC). If $\text{next\_delivery}$ lands in quiet hours, it automatically shifts to morning (`09:15` + random jitter).
+  * **Deduplication History:** Tracks previously delivered memes in `user_delivered_memes` table so a user never receives the same meme twice.
+* **SQLite Database Schema:**
+  ```sql
+  CREATE TABLE IF NOT EXISTS meme_subscriptions (
+      user_id BIGINT PRIMARY KEY,
+      active_until BIGINT NOT NULL,
+      memes_per_day INTEGER NOT NULL DEFAULT 3,
+      next_delivery_at BIGINT NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT 1
+  );
+
+  CREATE TABLE IF NOT EXISTS user_delivered_memes (
+      user_id BIGINT NOT NULL,
+      meme_id BIGINT NOT NULL,
+      delivered_at BIGINT NOT NULL,
+      PRIMARY KEY (user_id, meme_id)
+  );
+  ```
+* **Background Worker (`src/maintenance/drip_worker.rs`):**
+  * Lightweight async loop polling `meme_subscriptions` every 60s for `next_delivery_at <= now AND is_active = 1`.
+  * Selects an unviewed random meme (`$O(1)$` memory randomizer) and dispatches via `bot.send_photo`.
 
 ---
 
@@ -476,13 +530,25 @@ Meme ID: 1793041234
   - [x] Many-to-Many meme ownership (`memes` $\leftrightarrow$ `user_memes` $\leftrightarrow$ `users`).
   - [x] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
   - [x] Instant deduplication: skip Gemini AI if meme already exists in catalog.
+  - [x] Perceptual Hashing (pHash): resolution & compression independent duplicate detection (`image_hasher`).
+  - [x] Configurable Hamming distance threshold via `MAX_PHASH_DISTANCE` (default $\le 5$).
+  - [x] Autonomous Background Maintenance Worker (`src/maintenance/`): scheduled recurring backfill of pHash for legacy memes via Telegram Bot API.
+  - [x] Dual Multilingual Embeddings: separate Ukrainian & English vector spaces with OCR exact keyword boosting.
+  - [x] Standalone Database Migrations Engine (`src/migrations.rs`) with atomic batching & `_migrations` tracking.
+  - [x] Multi-Model VLM Fallback Pool (`GEMINNI_MODEL_POOL`): automated failover across `3.5-flash-lite`, `3.1-flash-lite`, `3.5-flash`, `3.6-flash`, `3.8-flash` on 503/429 spikes.
+  - [x] Progressive backoff and retry queue (5s, 10s) on transient VLM errors with sender requeue.
+  - [x] Markdown code fence cleanup (`clean_json`) and Serde field aliases in VLM response parser.
+  - [ ] Worker image download retry loop with backoff on Telegram network resets.
+  - [ ] Multi-shape VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, and flexible booleans (`"false"`, `0`).
   - [ ] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
   - [ ] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
-  - [ ] Resilient VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, markdown code fences, and flexible booleans (`"false"`, `0`).
   - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
-  - [ ] Exponential backoff and retry strategy for Telegram photo downloads and Gemini VLM calls.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
   - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
+  - [ ] Meme Drip Delivery (Рандомайзер мемів / «Дофамінова підписка»):
+    - [ ] SQLite tables `meme_subscriptions` and `user_delivered_memes`.
+    - [ ] Background Tokio scheduler with randomized Jitter intervals and Quiet Hours (`23:00` – `09:00`).
+    - [ ] Interactive commands `/drip` or `/subscribe` to activate/pause delivery and set daily frequency.
   - [ ] Production structured logging (`tracing` + `tracing-subscriber`):
     - [ ] Replace raw `println!` / `eprintln!` across `handlers`, `worker`, `vlm`, and `engine`.
     - [ ] Add UTC timestamps to every log line to track when actions happen.
@@ -518,6 +584,7 @@ Meme ID: 1793041234
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
+  - [x] Nuanced NSFW policy: strict photographic nudity protection with explicit cultural art/medieval illustration exemptions.
   - [ ] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**

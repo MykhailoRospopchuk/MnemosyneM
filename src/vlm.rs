@@ -36,7 +36,11 @@ pub struct MemeAnalysis {
     pub en_description: String,
 }
 
-pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnalysis, VlmError> {
+pub async fn describe_meme(
+    image_bytes: &[u8],
+    api_key: &str,
+    mime_type: &str,
+) -> Result<MemeAnalysis, VlmError> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(30))
         .build()
@@ -45,7 +49,8 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
     let base64_image = STANDARD.encode(image_bytes);
 
     println!(
-        "[VLM] Send image to Gemini {} (image: {} KB)...",
+        "[VLM] Send {} to Gemini {} (size: {} KB)...",
+        mime_type,
         GEMINNI_MODEL_POOL[0],
         image_bytes.len() / 1024
     );
@@ -75,7 +80,7 @@ pub async fn describe_meme(image_bytes: &[u8], api_key: &str) -> Result<MemeAnal
                 { "text" : prompt },
                 {
                     "inline_data": {
-                        "mime_type": "image/jpeg",
+                        "mime_type": mime_type,
                         "data": base64_image
                     }
                 }

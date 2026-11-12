@@ -29,7 +29,8 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
 
     let total = unhashed.len();
     if total == 0 {
-        println!("[MAINTENANCE] All memes already have phash. Nothing to process.")
+        println!("[MAINTENANCE] All memes already have phash. Nothing to process.");
+        return;
     }
 
     println!(

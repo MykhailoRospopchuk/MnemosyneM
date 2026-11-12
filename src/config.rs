@@ -15,7 +15,7 @@ static CONFIG: OnceLock<AppConfig> = OnceLock::new();
 
 pub fn load_config() -> &'static AppConfig {
     match env::var("TELOXIDE_TOKEN") {
-        Ok(url) => println!("TELOXIDE_TOKEN: {}", url),
+        Ok(_) => println!("TELOXIDE_TOKEN: [CONFIGURED]"),
         Err(e) => eprintln!("Couldn't read TELOXIDE_TOKEN: {}", e),
     }
 
@@ -32,13 +32,14 @@ pub fn load_config() -> &'static AppConfig {
     CONFIG.get_or_init(|| AppConfig {
         db_path: env::var("DB_PATH").expect("Couldn't read DB_PATH"),
         top_k: env::var("TOP_K")
-            .expect("Couldn't read TOP_K")
-            .parse::<usize>()
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(TOP_K),
+
         gemini_api_key: env::var("GEMINI_API_KEY").expect("Couldn't read GEMINI_API_KEY"),
         max_phash_distance: env::var("MAX_PHASH_DISTANCE")
-            .expect("Couldn't read MAX_PHASH_DISTANCE")
-            .parse::<u32>()
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(MAX_PHASH_DISTANCE),
     })
 }

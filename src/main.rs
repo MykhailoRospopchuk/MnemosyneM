@@ -1,5 +1,6 @@
 mod bot;
 mod config;
+mod database;
 mod db;
 mod engine;
 mod helpers;

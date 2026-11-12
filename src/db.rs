@@ -2,7 +2,7 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::SystemTime};
 
-use crate::engine::ClipEngine;
+use crate::{database::entity::media_type::MediaType, engine::ClipEngine};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Meme {
@@ -18,6 +18,8 @@ pub struct Meme {
     pub is_public: bool,
     pub owners: Vec<i64>,
     pub phash: u64,
+    pub media_type: MediaType,
+    pub thumbnail_tg_id: String,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct UserMeme {
@@ -133,6 +135,8 @@ impl MemeStore {
         source_url: String,
         engine: &mut ClipEngine,
         phash: u64,
+        media_type: MediaType,
+        thumbnail_tg_id: String,
     ) -> Result<(), String> {
         let passage_uk = format!("{} | {}", analysis.ocr_text, analysis.uk_description);
         let passage_en = format!("{} | {}", analysis.ocr_text, analysis.en_description);
@@ -159,9 +163,9 @@ impl MemeStore {
                 "INSERT INTO memes (
                     id, title, ocr_text, description_uk, description_en,
                     embedding_uk, embedding_en,
-                    file_tg_id, file_tg_unique_id, source_title, source_url, phash
+                    file_tg_id, file_tg_unique_id, source_title, source_url, phash, media_type, thumbnail_tg_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (file_tg_unique_id)
                 DO UPDATE SET
                     title = excluded.title,
@@ -172,7 +176,9 @@ impl MemeStore {
                     embedding_en = excluded.embedding_en,
                     source_title = excluded.source_title,
                     source_url = excluded.source_url,
-                    phash = excluded.phash ;",
+                    phash = excluded.phash,
+                    media_type = excluded.media_type,
+                    thumbnail_tg_id = excluded.thumbnail_tg_id;",
                 params![
                     id,
                     title,
@@ -185,7 +191,9 @@ impl MemeStore {
                     file_tg_unique_id,
                     source_title,
                     source_url,
-                    phash as i64
+                    phash as i64,
+                    media_type.as_i32(),
+                    thumbnail_tg_id
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -210,6 +218,8 @@ impl MemeStore {
             is_public,
             owners: vec![user_id],
             phash,
+            media_type,
+            thumbnail_tg_id,
         };
 
         if let Some(item) = self
@@ -295,7 +305,9 @@ impl MemeStore {
                 file_tg_unique_id TEXT NOT NULL UNIQUE,
                 source_title TEXT NOT NULL DEFAULT '',
                 source_url TEXT NOT NULL DEFAULT '',
-                phash BIGINT NOT NULL DEFAULT 0
+                phash BIGINT NOT NULL DEFAULT 0,
+                media_type INTEGER NOT NULL DEFAULT 0,
+                thumbnail_tg_id TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -321,7 +333,7 @@ impl MemeStore {
         .map_err(|e| e.to_string())?;
 
         let mut stmt = conn
-                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, source_title, source_url, phash FROM memes")
+                    .prepare("SELECT id, title, ocr_text, embedding_uk, embedding_en, file_tg_id, file_tg_unique_id, source_title, source_url, phash, media_type, thumbnail_tg_id FROM memes")
                     .map_err(|e| e.to_string())?;
         let meme_iter = stmt
             .query_map([], |row| {
@@ -336,6 +348,8 @@ impl MemeStore {
                 let source_url: String = row.get(8)?;
                 let phash_raw: i64 = row.get(9)?;
                 let phash: u64 = phash_raw as u64;
+                let media_type: MediaType = row.get(10).unwrap_or(MediaType::Photo);
+                let thumbnail_tg_id: String = row.get(11)?;
                 Ok(Meme {
                     id,
                     title,
@@ -349,6 +363,8 @@ impl MemeStore {
                     is_public: false,
                     owners: vec![],
                     phash,
+                    media_type,
+                    thumbnail_tg_id,
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -566,10 +582,18 @@ impl MemeStore {
         engine: &mut ClipEngine,
         k: usize,
         user_id: i64,
+        media_filter: Option<MediaType>,
     ) -> Result<Vec<(&'a Meme, f32)>, String> {
         let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
         let settings = self.get_user_settings(user_id);
-        let top_k = self.find_top_k(&embed, query_text, k, user_id, settings.search_scope);
+        let top_k = self.find_top_k(
+            &embed,
+            query_text,
+            k,
+            user_id,
+            settings.search_scope,
+            media_filter,
+        );
         Ok(top_k)
     }
 
@@ -580,8 +604,17 @@ impl MemeStore {
         k: usize,
         user_id: i64,
         scope_visibility: String,
+        media_filter: Option<MediaType>,
     ) -> Vec<(&Meme, f32)> {
-        find_top_k(query, query_text, &self.memes, k, user_id, scope_visibility)
+        find_top_k(
+            query,
+            query_text,
+            &self.memes,
+            k,
+            user_id,
+            scope_visibility,
+            media_filter,
+        )
     }
 
     pub fn find_duplicate_by_path(
@@ -658,7 +691,16 @@ impl MemeStore {
         self.memes
             .iter()
             .filter(|m| m.phash == 0)
-            .map(|m| (m.id, m.file_tg_id.clone()))
+            .filter_map(|m| match m.media_type {
+                MediaType::Photo => Some((m.id, m.file_tg_id.clone())),
+                MediaType::Animation => {
+                    if !m.thumbnail_tg_id.is_empty() {
+                        Some((m.id, m.thumbnail_tg_id.clone()))
+                    } else {
+                        None
+                    }
+                }
+            })
             .collect()
     }
 
@@ -715,6 +757,7 @@ pub fn find_top_k<'a>(
     k: usize,
     user_id: i64,
     scope_visible: String,
+    media_filter: Option<MediaType>,
 ) -> Vec<(&'a Meme, f32)> {
     let mut top_k: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
     let query_lower = query_text.to_lowercase();
@@ -726,6 +769,12 @@ pub fn find_top_k<'a>(
         if !meme.is_visible_to(user_id, &scope_visible) {
             continue;
         };
+
+        if let Some(filter) = media_filter {
+            if meme.media_type != filter {
+                continue;
+            }
+        }
 
         let sim_uk = cosine_similarity(query, &meme.embedding_uk).unwrap_or(0.0);
         let sim_en = cosine_similarity(query, &meme.embedding_en).unwrap_or(0.0);

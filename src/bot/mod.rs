@@ -51,6 +51,8 @@ pub async fn message_handler(
         if let Some(photo) = photos.last() {
             handlers::handle_photo(&bot, &msg, photo, state, &sender).await?;
         }
+    } else if let Some(animation) = msg.animation() {
+        handlers::handle_animation(&bot, &msg, animation, state, &sender).await?;
     } else if let Some(text) = msg.text() {
         if text.starts_with('/') {
             match comand::Command::parse(text, "") {

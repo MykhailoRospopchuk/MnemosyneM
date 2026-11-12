@@ -1,6 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use crate::config::AppConfig;
+use crate::database::entity::media_type::MediaType;
 use crate::vlm;
 use crate::{AppState, helpers::hash_helper::compute_hash};
 use teloxide::{
@@ -21,6 +22,8 @@ pub struct MemeJob {
     pub user_id: i64,
     pub source_title: String,
     pub source_url: String,
+    pub media_type: MediaType,
+    pub thumbnail_file_id: Option<String>,
 }
 
 pub fn start_worker(
@@ -55,15 +58,64 @@ pub fn start_worker(
                 continue;
             }
 
-            let phash = match compute_hash(&image_bytes) {
-                Ok(phash) => phash,
-                Err(e) => {
-                    eprintln!(
-                        "[WORKER]-[WARN] Failed to compute hash for image: {}",
-                        e.to_string()
-                    );
-                    0
+            let phash = match job.media_type {
+                MediaType::Photo => {
+                    let phash = match compute_hash(&image_bytes) {
+                        Ok(phash) => phash,
+                        Err(e) => {
+                            eprintln!(
+                                "[WORKER]-[WARN] Failed to compute hash for image: {}",
+                                e.to_string()
+                            );
+                            0
+                        }
+                    };
+                    phash
                 }
+                MediaType::Animation => {
+                    if let Some(thumbnail_id) = job.thumbnail_file_id.clone() {
+                        match bot.get_file(FileId(thumbnail_id)).await {
+                            Ok(thumb_file) => {
+                                let mut thumb_bytes: Vec<u8> = Vec::new();
+
+                                if bot
+                                    .download_file(&thumb_file.path, &mut thumb_bytes)
+                                    .await
+                                    .is_ok()
+                                {
+                                    let phash = match compute_hash(&thumb_bytes) {
+                                        Ok(phash) => phash,
+                                        Err(e) => {
+                                            eprintln!(
+                                                "[WORKER]-[WARN] Failed to compute hash for media: {}",
+                                                e.to_string()
+                                            );
+                                            0
+                                        }
+                                    };
+                                    phash
+                                } else {
+                                    eprintln!("[WORKER]-[WARN] Failed to download media");
+                                    0
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!(
+                                    "[WORKER]-[WARN] Failed to get thumbnail media: {}",
+                                    e.to_string()
+                                );
+                                0
+                            }
+                        }
+                    } else {
+                        0
+                    }
+                }
+            };
+
+            let mime_type = match job.media_type {
+                MediaType::Animation => "video/mp4",
+                MediaType::Photo => "image/jpeg",
             };
 
             if phash != 0 {
@@ -100,7 +152,12 @@ pub fn start_worker(
                 drop(store);
             }
 
-            let analysis = match vlm::describe_meme(&image_bytes, &app_config.gemini_api_key).await
+            let analysis = match vlm::describe_meme(
+                &image_bytes,
+                &app_config.gemini_api_key,
+                &mime_type,
+            )
+            .await
             {
                 Ok(desc) => desc,
                 Err(vlm::VlmError::InappropriateContent(reason)) => {
@@ -171,6 +228,8 @@ pub fn start_worker(
                 job.source_url,
                 &mut engine,
                 phash,
+                job.media_type,
+                job.thumbnail_file_id.unwrap_or("".to_string()),
             ) {
                 Ok(()) => {
                     println!("[WORKER] Sucessfully saved in SQLite!");

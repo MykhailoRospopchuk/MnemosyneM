@@ -1,3 +1,4 @@
+pub mod database;
 pub mod db;
 pub mod engine;
 pub mod migrations;

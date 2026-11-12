@@ -19,6 +19,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
 
     recalculate_embeddings(&mut conn, engine)?;
     add_hash_column_to_memes(&mut conn)?;
+    add_media_type_column(&mut conn)?;
 
     Ok(())
 }
@@ -148,6 +149,76 @@ fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
     if !has_hash {
         conn.execute(
             "ALTER TABLE memes ADD COLUMN phash BIGINT NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    Ok(())
+}
+
+fn add_media_type_column(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1794512263_add_media_type_column".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    println!(
+        "[MIGRATION] - {}: Adding media type column to memes table...",
+        migration_name
+    );
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memes)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_media_type = false;
+    let mut has_thumbnail = false;
+    for column in columns.flatten() {
+        if column == "media_type" {
+            has_media_type = true;
+        }
+
+        if column == "thumbnail_tg_id" {
+            has_thumbnail = true;
+        }
+    }
+
+    drop(stmt);
+
+    if !has_media_type {
+        conn.execute(
+            "ALTER TABLE memes ADD COLUMN media_type INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if !has_thumbnail {
+        conn.execute(
+            "ALTER TABLE memes ADD COLUMN thumbnail_tg_id TEXT NOT NULL DEFAULT ''",
             [],
         )
         .map_err(|e| e.to_string())?;
