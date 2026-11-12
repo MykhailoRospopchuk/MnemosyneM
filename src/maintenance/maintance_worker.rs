@@ -3,7 +3,11 @@ use std::{sync::Arc, time::Duration};
 use teloxide::{Bot, net::Download, requests::Requester, types::FileId};
 use tokio::time::{MissedTickBehavior, interval};
 
-use crate::{AppState, helpers::hash_helper::compute_hash};
+use crate::database::entity::media_type::MediaType;
+use crate::{
+    AppState,
+    helpers::hash_helper::{compute_hash, extract_frame_from_video},
+};
 
 pub fn start_maintenance(state: Arc<AppState>, bot: Bot) {
     tokio::spawn(async move {
@@ -34,13 +38,13 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
     }
 
     println!(
-        "[MAINTENANCE] Fount {} memes withoud phash, Processing on background...",
+        "[MAINTENANCE] Found {} memes without phash, Processing in background...",
         total
     );
 
     let mut success_count = 0;
 
-    for (idx, (meme_id, file_tg_id)) in unhashed.into_iter().enumerate() {
+    for (idx, (meme_id, file_tg_id, media_type)) in unhashed.into_iter().enumerate() {
         let file = match bot.get_file(FileId(file_tg_id)).await {
             Ok(f) => f,
             Err(e) => {
@@ -52,16 +56,23 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
             }
         };
 
-        let mut image_bytes: Vec<u8> = Vec::new();
-        if let Err(e) = bot.download_file(&file.path, &mut image_bytes).await {
+        let mut file_bytes: Vec<u8> = Vec::new();
+        if let Err(e) = bot.download_file(&file.path, &mut file_bytes).await {
             eprintln!(
-                "[MAINTENANCE]-[WARN] Failed to download image for meme {} : {}",
+                "[MAINTENANCE]-[WARN] Failed to download media for meme {} : {}",
                 meme_id, e
             );
             continue;
         }
 
-        let phash = match compute_hash(&image_bytes) {
+        let phash = match media_type {
+            MediaType::Photo => compute_hash(&file_bytes),
+            MediaType::Animation => {
+                extract_frame_from_video(&file_bytes).and_then(|frame| compute_hash(&frame))
+            }
+        };
+
+        let phash = match phash {
             Ok(h) => h,
             Err(e) => {
                 eprintln!(
@@ -96,7 +107,7 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
     }
 
     println!(
-        "[MAINTENANCE] Processing finished! Sucessfully hashed {}/{} memes.",
+        "[MAINTENANCE] Processing finished! Successfully hashed {}/{} memes.",
         success_count, total
     );
 }

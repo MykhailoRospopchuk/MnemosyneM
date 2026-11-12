@@ -3,7 +3,10 @@ use std::{sync::Arc, time::Duration};
 use crate::config::AppConfig;
 use crate::database::entity::media_type::MediaType;
 use crate::vlm;
-use crate::{AppState, helpers::hash_helper::compute_hash};
+use crate::{
+    AppState,
+    helpers::hash_helper::{compute_hash, extract_frame_from_video},
+};
 use teloxide::{
     Bot,
     net::Download,
@@ -73,43 +76,31 @@ pub fn start_worker(
                     phash
                 }
                 MediaType::Animation => {
+                    let mut frame_bytes = None;
                     if let Some(thumbnail_id) = job.thumbnail_file_id.clone() {
-                        match bot.get_file(FileId(thumbnail_id)).await {
-                            Ok(thumb_file) => {
-                                let mut thumb_bytes: Vec<u8> = Vec::new();
-
-                                if bot
-                                    .download_file(&thumb_file.path, &mut thumb_bytes)
-                                    .await
-                                    .is_ok()
-                                {
-                                    let phash = match compute_hash(&thumb_bytes) {
-                                        Ok(phash) => phash,
-                                        Err(e) => {
-                                            eprintln!(
-                                                "[WORKER]-[WARN] Failed to compute hash for media: {}",
-                                                e.to_string()
-                                            );
-                                            0
-                                        }
-                                    };
-                                    phash
-                                } else {
-                                    eprintln!("[WORKER]-[WARN] Failed to download media");
-                                    0
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!(
-                                    "[WORKER]-[WARN] Failed to get thumbnail media: {}",
-                                    e.to_string()
-                                );
-                                0
+                        if let Ok(thumb_file) = bot.get_file(FileId(thumbnail_id)).await {
+                            let mut thumb_bytes: Vec<u8> = Vec::new();
+                            if bot
+                                .download_file(&thumb_file.path, &mut thumb_bytes)
+                                .await
+                                .is_ok()
+                            {
+                                frame_bytes = Some(thumb_bytes);
                             }
                         }
-                    } else {
-                        0
                     }
+
+                    let jpeg_bytes = match frame_bytes {
+                        Some(b) => Some(b),
+                        None => {
+                            println!("[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg...");
+                            extract_frame_from_video(&image_bytes).ok()
+                        }
+                    };
+
+                    jpeg_bytes
+                        .and_then(|b| compute_hash(&b).ok())
+                        .unwrap_or(0)
                 }
             };
 

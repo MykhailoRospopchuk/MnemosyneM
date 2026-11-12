@@ -687,20 +687,11 @@ impl MemeStore {
         Ok(is_new)
     }
 
-    pub fn get_unhashed_memes(&self) -> Vec<(u64, String)> {
+    pub fn get_unhashed_memes(&self) -> Vec<(u64, String, MediaType)> {
         self.memes
             .iter()
             .filter(|m| m.phash == 0)
-            .filter_map(|m| match m.media_type {
-                MediaType::Photo => Some((m.id, m.file_tg_id.clone())),
-                MediaType::Animation => {
-                    if !m.thumbnail_tg_id.is_empty() {
-                        Some((m.id, m.thumbnail_tg_id.clone()))
-                    } else {
-                        None
-                    }
-                }
-            })
+            .map(|m| (m.id, m.file_tg_id.clone(), m.media_type))
             .collect()
     }
 

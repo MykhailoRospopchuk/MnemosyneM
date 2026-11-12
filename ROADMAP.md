@@ -575,12 +575,13 @@ Meme ID: 1793041234
     - [ ] Build multi-row keyboard with `resize_keyboard(true)` and `persistent()` for one-tap thumb navigation.
     - [ ] Buttons: `🔥 Мем-Тіндер`, `🎲 Випадковий мем`, `❤️ Вподобані`, `🏷️ Теги/Категорії`, `⚙️ Налаштування`, `📊 Статистика`.
     - [ ] Map button text directly into bot command dispatcher.
-  - [ ] GIF & Video Animation Support (`media_type = 'animation'`):
-    - [ ] Telegram `Message::Animation` ingestion handler in `bot/handlers.rs`.
-    - [ ] Gemini VLM MP4 multimodal video analysis (`inline_data` with `video/mp4`).
-    - [ ] SQLite schema migration: add `media_type` to `memes` (`'photo'` / `'animation'`).
-    - [ ] Dual-mode search delivery: `bot.send_animation` for direct chat & `InlineQueryResultCachedMpeg4Gif` for inline queries.
-    - [ ] Lightweight pHash computation using `animation.thumbnail` (no FFmpeg needed).
+  - [x] GIF & Video Animation Support (`media_type: MediaType::Animation`):
+    - [x] Telegram `Message::Animation` ingestion handler in `bot/handlers.rs`.
+    - [x] Gemini VLM MP4 multimodal video analysis (`inline_data` with `video/mp4`).
+    - [x] SQLite schema migration: add `media_type INTEGER NOT NULL DEFAULT 0` and `thumbnail_tg_id TEXT`.
+    - [x] Dual-mode search delivery: `bot.send_animation` for direct chat & `InlineQueryResultCachedMpeg4Gif` for inline queries.
+    - [x] Resilient pHash computation: from `animation.thumbnail` with in-memory `ffmpeg` pipe fallback when Telegram thumbnail is missing.
+    - [x] Unified Bang search modifiers: `!gif` and `!img` (or `!pic`) for explicit media filtering in inline queries and chat search.
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.

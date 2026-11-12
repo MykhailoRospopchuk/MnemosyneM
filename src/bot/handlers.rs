@@ -260,10 +260,12 @@ pub async fn handle_search(
                     }
                 }
 
-                if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await {
-                    eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
-                    bot.send_message(msg.chat.id, format!("Send album error: {}", e))
-                        .await?;
+                if result_media_group.len() != 0 {
+                    if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await {
+                        eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
+                        bot.send_message(msg.chat.id, format!("Send album error: {}", e))
+                            .await?;
+                    }
                 }
             }
         }
