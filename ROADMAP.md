@@ -19,6 +19,8 @@ flowchart TD
         Privacy["Public vs Private Memes & Search Scopes"]
         Inline["Telegram Inline Mode (@bot query anywhere)"]
         Logging["Structured Logging (tracing + timestamps + user attribution)"]
+        Resilience["Startup & Network Resilience (retry loops, non-fatal command setup, token masking)"]
+        GIFs["GIF & Animation Support (Telegram MP4 + Gemini Video VLM)"]
     end
 
     subgraph M3 ["v0.3: Content Moderation & Admin"]
@@ -194,6 +196,24 @@ Telegram provides native support for **Inline Bots** (`InlineQuery`):
     ORDER BY total_memes DESC;
     ```
 
+### 3.4. GIF & Animation Support (MP4 Memes)
+* **Goal:** Enable first-class semantic search and sharing for animated memes (GIFs) with zero hosting costs and pure Rust architecture.
+* **Architecture & Technical Decisions:**
+  * **Telegram Animation Object:** In Telegram, GIFs are represented as `Message::Animation` (H.264 MP4 video without audio). Telegram stores the video and provides `file_id`, `file_unique_id`, and `thumbnail: Option<PhotoSize>`.
+  * **Native Multimodal Video Ingestion (Gemini VLM):**
+    * Send MP4 bytes directly to Gemini API using `inline_data` with `mime_type: "video/mp4"`.
+    * Gemini natively understands the scene's dynamic timeline, character motion, and text/captions appearing across frames.
+    * **No FFmpeg dependency:** Eliminates heavy C/FFI bindings, cross-compilation hurdles, and server-side video decoding overhead.
+  * **Zero-Cost Storage & Delivery:**
+    * Zero server disk storage (Telegram Cloud hosts the media).
+    * Direct chat response: `bot.send_animation(job.chat_id, FileId(job.file_id))`.
+    * Inline Query response: `InlineQueryResultCachedMpeg4Gif` using cached `file_id` (zero server upload bandwidth).
+  * **Fast Perceptual Hash (pHash):** Computed from `animation.thumbnail` (instant JPEG hash, zero video frame demuxing needed).
+  * **Database Schema Extension:**
+    ```sql
+    ALTER TABLE memes ADD COLUMN media_type TEXT NOT NULL DEFAULT 'photo'; -- 'photo' | 'animation'
+    ```
+
 ---
 
 ## 🛡️ Milestone 4: Content Moderation & NSFW Protection (v0.3)
@@ -345,7 +365,34 @@ Meme ID: 1793041234
 
 ---
 
-## 🚀 Milestone 8: High-Performance Vector Engine from Scratch (v0.4)
+## 🛡️ Milestone 8: Network Fault Tolerance, Startup Resilience & Secret Hygiene (v0.2 / v0.3)
+> **Goal:** Eliminate startup panics from transient network drops, establish graceful degradation for Telegram API calls, guarantee zero credential leakage in logs, and make VLM JSON response parsing immune to LLM array wrapping or type variations.
+
+### 8.1. Problem & Real-World Failure Scenarios
+* **Startup Panic on Network Hiccup:** Calls to `bot.set_my_commands(...)` invoke `.expect("Cannot set commands")`. When temporary DNS glitches, TLS handshake resets (`ConnectionReset by peer` / `OS error 104`), or Telegram API outages occur, the entire bot crashes immediately upon launch, aborting before the dispatcher can run.
+* **Non-Critical Fatalities:** Telegram bot commands are persisted server-side by Telegram. Failing to synchronize command metadata at startup should never be a fatal error that terminates the process.
+* **Credential Exposure in Terminal Logs:** Startup configuration logging prints `TELOXIDE_TOKEN` in plain text to `stdout`, exposing production bot tokens in copy-pasted logs, shell histories, and CI/CD outputs.
+* **VLM JSON Deserialization Failure on Array Responses:** Gemini occasionally wraps its output in a 1-element JSON array `[ { ... } ]` instead of a top-level JSON object `{ ... }`. Serde interprets sequences as positional struct fields; since `MemeAnalysis`'s first field is `is_nsfw: bool`, encountering an object `{` triggers `invalid type: map, expected a boolean at line 2 column 2`. If repeated across retries, the worker hits max retries and drops the meme permanently.
+
+### 8.2. Architecture & Resilience Patterns
+* **Retry Loop with Exponential Backoff:**
+  * For startup and background network tasks (such as `set_my_commands`), execute a multi-attempt retry loop with backoff (e.g., 3 retries with 2-second sleep).
+* **Non-Fatal Fallback & Graceful Degradation:**
+  * If non-critical setup calls fail after exhausting retries, log a structured `[ERROR]` and proceed with bot dispatching instead of calling `panic!` or `.expect()`.
+* **Secret Sanitization & Masking:**
+  * Sensitive tokens (`TELOXIDE_TOKEN`, `GEMINI_API_KEY`) must never be written to stdout or logs. Mask values using `[CONFIGURED]` or partial truncation (`1234****abcd`).
+* **Multi-Shape VLM JSON Parser:**
+  * Parse raw text into an intermediate `serde_json::Value`. Automatically extract the first element if Gemini returns an array `[ { ... } ]` and unwrap outer object wrappers (e.g., `{ "meme": { ... } }`).
+  * Add flexible boolean deserialization to handle string representations (`"false"`, `"true"`) and integer flags (`0`, `1`).
+  * Provide robust markdown code fence cleanup (`clean_json_str`) for ````json ... ```` blocks.
+* **Dispatcher & Polling Connection Recovery:**
+  * Configure Teloxide's dispatcher error handler to log network disconnections cleanly and apply reconnect backoff without crashing the process during extended network outages.
+* **Worker Image Download Resilience:**
+  * Protect Telegram file downloads in the MPSC worker against transient `reqwest` connection resets using automated retries before marking an ingestion job as failed.
+
+---
+
+## 🚀 Milestone 9: High-Performance Vector Engine from Scratch (v0.4)
 > **Target:** Senior Systems Rust / High-Performance Engineering Portfolio Piece.
 
 ### 🎯 Portfolio Elevator Pitch for CV:
@@ -353,7 +400,7 @@ Meme ID: 1793041234
 
 ---
 
-### 8.1. SIMD AVX2 / FMA Vector Math Kernel
+### 9.1. SIMD AVX2 / FMA Vector Math Kernel
 * **Current State:** Scalar iterator `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`.
 * **SIMD Architecture:**
   * Uses 256-bit `YMM` registers via `core::arch::x86_64`.
@@ -367,7 +414,7 @@ Meme ID: 1793041234
 
 ---
 
-### 8.2. HNSW (Hierarchical Navigable Small World) Graph Index
+### 9.2. HNSW (Hierarchical Navigable Small World) Graph Index
 * **Current State:** Brute-force Flat KNN ($O(N)$ linear scan over all memes).
 * **HNSW Architecture:**
   * Multi-layer skip-list inspired graph of vector nodes:
@@ -380,7 +427,7 @@ Meme ID: 1793041234
 
 ---
 
-### 8.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
+### 9.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
 * **Current State:** 3072-byte Little-Endian BLOBs stored inside SQLite rows.
 * **New Storage Engine (`.vec` format):**
   * Dedicated append-only binary vector file with structured header:
@@ -398,7 +445,7 @@ Meme ID: 1793041234
 
 ---
 
-### 8.4. Scalar Quantization (SQ8) *(Optional Optimization)*
+### 9.4. Scalar Quantization (SQ8) *(Optional Optimization)*
 * Compresses 32-bit float vectors (`f32`, 3072 bytes per vector) into 8-bit unsigned integers (`u8`, 768 bytes per vector).
 * Achieves **75% RAM reduction** while maintaining $>98\%$ recall accuracy.
 * Enables integer SIMD instructions (`_mm256_maddubs_epi16`).
@@ -429,6 +476,11 @@ Meme ID: 1793041234
   - [x] Many-to-Many meme ownership (`memes` $\leftrightarrow$ `user_memes` $\leftrightarrow$ `users`).
   - [x] Channel forward attribution (`MessageOrigin::Channel` `source_title` & `source_url`).
   - [x] Instant deduplication: skip Gemini AI if meme already exists in catalog.
+  - [ ] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
+  - [ ] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
+  - [ ] Resilient VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, markdown code fences, and flexible booleans (`"false"`, `0`).
+  - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
+  - [ ] Exponential backoff and retry strategy for Telegram photo downloads and Gemini VLM calls.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
   - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
   - [ ] Production structured logging (`tracing` + `tracing-subscriber`):
@@ -457,6 +509,12 @@ Meme ID: 1793041234
     - [ ] Build multi-row keyboard with `resize_keyboard(true)` and `persistent()` for one-tap thumb navigation.
     - [ ] Buttons: `🔥 Мем-Тіндер`, `🎲 Випадковий мем`, `❤️ Вподобані`, `🏷️ Теги/Категорії`, `⚙️ Налаштування`, `📊 Статистика`.
     - [ ] Map button text directly into bot command dispatcher.
+  - [ ] GIF & Video Animation Support (`media_type = 'animation'`):
+    - [ ] Telegram `Message::Animation` ingestion handler in `bot/handlers.rs`.
+    - [ ] Gemini VLM MP4 multimodal video analysis (`inline_data` with `video/mp4`).
+    - [ ] SQLite schema migration: add `media_type` to `memes` (`'photo'` / `'animation'`).
+    - [ ] Dual-mode search delivery: `bot.send_animation` for direct chat & `InlineQueryResultCachedMpeg4Gif` for inline queries.
+    - [ ] Lightweight pHash computation using `animation.thumbnail` (no FFmpeg needed).
 - [ ] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
