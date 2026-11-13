@@ -145,7 +145,7 @@ pub fn format_settings(settings: &UserSetting) -> (String, InlineKeyboardMarkup)
         _ => "[A] All (Public + Mine)",
     };
 
-    let text = format!("[S] User settings:\n");
+    let text = "[S] User settings:\n".to_string();
 
     let keyboard = InlineKeyboardMarkup::new(vec![
         vec![InlineKeyboardButton::callback(

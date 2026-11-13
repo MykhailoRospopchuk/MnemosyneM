@@ -49,19 +49,22 @@ pub fn start_worker(
                 receiver.len()
             );
 
-            let file = match bot.get_file(FileId(job.file_id.clone())).await {
-                Ok(f) => f,
+            let image_bytes = match download_telegram_file(&bot, &job.file_id, 3).await {
+                Ok(bytes) => bytes,
                 Err(e) => {
-                    eprintln!("[WORKER]-[ERROR] Failed to get file from TG: {}", e);
+                    eprintln!(
+                        "[WORKER]-[ERROR] Failed to download file after retries: {}",
+                        e
+                    );
+                    let _ = bot
+                        .send_message(
+                            job.chat_id,
+                            format!("[X] Failed to download media from Telegram: {}", e),
+                        )
+                        .await;
                     continue;
                 }
             };
-
-            let mut image_bytes: Vec<u8> = Vec::new();
-            if let Err(e) = bot.download_file(&file.path, &mut image_bytes).await {
-                eprintln!("[WORKER]-[ERROR] Failed to download image: {}", e);
-                continue;
-            }
 
             let phash = match job.media_type {
                 MediaType::Photo => {
@@ -81,16 +84,24 @@ pub fn start_worker(
                 MediaType::Animation => {
                     let mut frame_bytes = None;
                     if let Some(thumbnail_id) = job.thumbnail_file_id.clone() {
-                        if let Ok(thumb_file) = bot.get_file(FileId(thumbnail_id)).await {
-                            let mut thumb_bytes: Vec<u8> = Vec::new();
-                            if bot
-                                .download_file(&thumb_file.path, &mut thumb_bytes)
-                                .await
-                                .is_ok()
-                            {
-                                frame_bytes = Some(thumb_bytes);
+                        match download_telegram_file(&bot, &thumbnail_id, 3).await {
+                            Ok(bytes) => frame_bytes = Some(bytes),
+                            Err(e) => {
+                                eprintln!(
+                                    "[WORKER]-[ERROR] Failed to download thumbnail after retries: {}",
+                                    e
+                                );
+                                let _ = bot
+                                    .send_message(
+                                        job.chat_id,
+                                        format!(
+                                            "[X] Failed to download media from Telegram: {}",
+                                            e
+                                        ),
+                                    )
+                                    .await;
                             }
-                        }
+                        };
                     }
 
                     let bytes_for_ffmpeg = if frame_bytes.is_none() {
@@ -155,7 +166,7 @@ pub fn start_worker(
             let analysis = match vlm::describe_meme(
                 &image_bytes,
                 &app_config.gemini_api_key,
-                &mime_type,
+                mime_type,
             )
             .await
             {
@@ -238,7 +249,7 @@ pub fn start_worker(
                     let _ = bot
                         .send_message(
                             job.chat_id,
-                            format!("[V] Your meme has been confiscated..."),
+                            "[V] Your meme has been confiscated...".to_string(),
                         )
                         .await;
                 }
@@ -253,4 +264,40 @@ pub fn start_worker(
             tokio::time::sleep(Duration::from_secs(4)).await;
         }
     });
+}
+
+async fn download_telegram_file(
+    bot: &Bot,
+    file_id: &str,
+    max_attemp: u32,
+) -> Result<Vec<u8>, String> {
+    let mut last_error = String::new();
+
+    for attemp in 1..=max_attemp {
+        match bot.get_file(FileId(file_id.to_string())).await {
+            Ok(file) => {
+                let mut file_bytes: Vec<u8> = Vec::new();
+                match bot.download_file(&file.path, &mut file_bytes).await {
+                    Ok(()) => return Ok(file_bytes),
+                    Err(e) => {
+                        last_error = e.to_string();
+                    }
+                }
+            }
+            Err(e) => {
+                last_error = e.to_string();
+            }
+        }
+
+        if attemp < max_attemp {
+            let delay_second = attemp as u64 * (2 * attemp as u64);
+            eprintln!(
+                "[WORKER]-[WARN] Attempt {}/{} for file {} failed ({}). Retrying in {} sec...",
+                attemp, max_attemp, file_id, last_error, delay_second
+            );
+            tokio::time::sleep(Duration::from_secs(delay_second)).await;
+        }
+    }
+
+    Err(last_error)
 }

@@ -701,10 +701,10 @@ fn find_top_k<'a>(
             continue;
         };
 
-        if let Some(filter) = media_filter {
-            if meme.media_type != filter {
-                continue;
-            }
+        if let Some(filter) = media_filter
+            && meme.media_type != filter
+        {
+            continue;
         }
 
         let sim_uk = cosine_similarity(query, &meme.embedding_uk).unwrap_or(0.0);

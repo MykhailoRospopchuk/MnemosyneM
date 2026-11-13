@@ -1,8 +1,8 @@
+use image_hasher::HasherConfig;
 use std::io::{ErrorKind, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
-use image_hasher::HasherConfig;
 
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -32,7 +32,10 @@ pub fn extract_frame_from_video(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
     match run_ffmpeg_pipe(video_bytes) {
         Ok(frame) => Ok(frame),
         Err(pipe_err) => run_ffmpeg_tempfile(video_bytes).map_err(|file_err| {
-            format!("pipe failed ({}); tempfile fallback failed ({})", pipe_err, file_err)
+            format!(
+                "pipe failed ({}); tempfile fallback failed ({})",
+                pipe_err, file_err
+            )
         }),
     }
 }
@@ -40,10 +43,14 @@ pub fn extract_frame_from_video(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
 fn run_ffmpeg_pipe(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = Command::new("ffmpeg")
         .args([
-            "-i", "pipe:0",
-            "-vframes", "1",
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
+            "-i",
+            "pipe:0",
+            "-vframes",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
             "pipe:1",
         ])
         .stdin(Stdio::piped())
@@ -66,10 +73,10 @@ fn run_ffmpeg_pipe(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
             .wait_with_output()
             .map_err(|e| format!("ffmpeg execution failed: {}", e))?;
 
-        if let Some(h) = handle {
-            if let Ok(Err(e)) = h.join() {
-                return Err(format!("Failed to write to ffmpeg stdin: {}", e));
-            }
+        if let Some(h) = handle
+            && let Ok(Err(e)) = h.join()
+        {
+            return Err(format!("Failed to write to ffmpeg stdin: {}", e));
         }
 
         Ok(output)
@@ -103,9 +110,12 @@ fn run_ffmpeg_tempfile(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
         .arg("-i")
         .arg(&guard.0)
         .args([
-            "-vframes", "1",
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
+            "-vframes",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "mjpeg",
             "pipe:1",
         ])
         .stdin(Stdio::null())

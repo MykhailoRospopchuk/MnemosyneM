@@ -32,7 +32,7 @@ async fn main() {
     println!("Loading storage and models...");
 
     let mut engine = engine::ClipEngine::new().expect("Failed to create clip engine");
-    let _ = migrations::run(&app_config.db_path, &mut engine).expect("Failed to run migration");
+    migrations::run(&app_config.db_path, &mut engine).expect("Failed to run migration");
     let store = MemeStore::open(&app_config.db_path).expect("Failed to open database");
 
     let state = Arc::new(AppState {

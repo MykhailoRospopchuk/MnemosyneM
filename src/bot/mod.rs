@@ -119,14 +119,13 @@ pub async fn callback_handler(
             eprintln!("[WARN] Failed to answer callback query: {}", e);
         };
 
-        if let Some(msg) = callback_query.regular_message() {
-            if let Err(e) = bot
+        if let Some(msg) = callback_query.regular_message()
+            && let Err(e) = bot
                 .edit_message_text(msg.chat.id, msg.id, text)
                 .reply_markup(keyboard)
                 .await
-            {
-                eprintln!("[WARN] Failed to edit message: {}", e);
-            }
+        {
+            eprintln!("[WARN] Failed to edit message: {}", e);
         }
     }
     Ok(())

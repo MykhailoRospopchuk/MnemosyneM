@@ -149,17 +149,16 @@ pub async fn describe_meme(
             )));
         }
 
-        if let Some(candidate) = json_responce["candidates"].get(0) {
-            if candidate["finishReason"].as_str() == Some("SAFETY") {
-                println!(
-                    "[VLM BLOCKED] Gemini blocked this image by Safety Filter! Gemini response: {}",
-                    json_responce
-                );
-                return Err(VlmError::InappropriateContent(
-                    "Inappropriate content detected (Gemini Safety Filter Explicit/NSFW)"
-                        .to_string(),
-                ));
-            }
+        if let Some(candidate) = json_responce["candidates"].get(0)
+            && candidate["finishReason"].as_str() == Some("SAFETY")
+        {
+            println!(
+                "[VLM BLOCKED] Gemini blocked this image by Safety Filter! Gemini response: {}",
+                json_responce
+            );
+            return Err(VlmError::InappropriateContent(
+                "Inappropriate content detected (Gemini Safety Filter Explicit/NSFW)".to_string(),
+            ));
         }
 
         let raw_text = json_responce["candidates"][0]["content"]["parts"][0]["text"]
