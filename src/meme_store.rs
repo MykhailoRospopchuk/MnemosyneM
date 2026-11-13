@@ -1,97 +1,23 @@
 use rusqlite::{Connection, params};
-use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, time::SystemTime};
 
-use crate::{database::entity::media_type::MediaType, engine::ClipEngine};
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Meme {
-    pub id: u64,
-    pub title: String,
-    ocr_text: String,
-    embedding_uk: Vec<f32>,
-    embedding_en: Vec<f32>,
-    pub file_tg_id: String,
-    pub file_tg_unique_id: String,
-    pub source_title: String,
-    pub source_url: String,
-    pub is_public: bool,
-    pub owners: Vec<i64>,
-    pub phash: u64,
-    pub media_type: MediaType,
-    pub thumbnail_tg_id: String,
-}
-#[derive(Debug, Clone, PartialEq)]
-pub struct UserMeme {
-    pub user_id: i64,
-    pub meme_id: u64,
-    pub user_captions: String,
-    is_public: bool,
-    created_at: i64,
-}
+use crate::{
+    database::{
+        entity::{
+            media_type::MediaType, meme::Meme, new_meme::NewMeme, user_meme::UserMeme,
+            user_setting::UserSetting,
+        },
+        enums::book_mark_status_enum::BookMarkStatus,
+    },
+    engine::ClipEngine,
+    helpers::embeding_helper::{blob_to_embedding, embedding_to_blob},
+};
 
 #[derive(Debug)]
 pub struct MemeStore {
     conn: Connection,
     memes: Vec<Meme>,
     user_settings: HashMap<i64, UserSetting>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct UserSetting {
-    pub user_id: i64,
-    pub username: String,
-    pub first_name: String,
-    pub last_name: String,
-    pub upload_as_public: bool,
-    pub search_scope: String,
-}
-
-pub enum BookMarkStatus {
-    AlreadyInCollection,
-    AddedInstantly,
-    NewMemeNeeded,
-}
-
-pub struct NewMeme<'a> {
-    pub id: u64,
-    pub title: String,
-    pub analysis: &'a crate::vlm::MemeAnalysis,
-    pub file_tg_id: String,
-    pub file_tg_unique_id: String,
-    pub user_id: i64,
-    pub source_title: String,
-    pub source_url: String,
-    pub phash: u64,
-    pub media_type: MediaType,
-    pub thumbnail_tg_id: String,
-}
-
-impl Default for UserSetting {
-    fn default() -> Self {
-        Self {
-            user_id: 0,
-            username: "".to_string(),
-            first_name: "".to_string(),
-            last_name: "".to_string(),
-            upload_as_public: true,
-            search_scope: "all".to_string(),
-        }
-    }
-}
-
-impl Meme {
-    pub fn is_owned_by(&self, user_id: i64) -> bool {
-        self.owners.contains(&user_id)
-    }
-
-    pub fn is_visible_to(&self, user_id: i64, scope: &str) -> bool {
-        match scope {
-            "private_only" => self.is_owned_by(user_id),
-            "public_only" => self.is_public,
-            _ => self.is_public || self.is_owned_by(user_id),
-        }
-    }
 }
 
 impl MemeStore {
@@ -160,8 +86,8 @@ impl MemeStore {
 
         let is_public = self.get_user_settings(new_meme.user_id).upload_as_public;
 
-        let blob_uk = self::embedding_to_blob(&embed_uk);
-        let blob_en = self::embedding_to_blob(&embed_en);
+        let blob_uk = embedding_to_blob(&embed_uk);
+        let blob_en = embedding_to_blob(&embed_en);
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -737,19 +663,7 @@ impl MemeStore {
     }
 }
 
-pub fn embedding_to_blob(embedding: &[f32]) -> Vec<u8> {
-    embedding
-        .iter()
-        .flat_map(|&val| val.to_le_bytes())
-        .collect()
-}
-pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
-    blob.chunks_exact(4)
-        .map(|chunk| f32::from_le_bytes(chunk.try_into().unwrap()))
-        .collect()
-}
-
-pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
+fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     if a.len() != b.len() {
         return Err(format!("{} != {}", a.len(), b.len()));
     }
@@ -767,7 +681,7 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
-pub fn find_top_k<'a>(
+fn find_top_k<'a>(
     query: &[f32],
     query_text: &str,
     memes: &'a [Meme],

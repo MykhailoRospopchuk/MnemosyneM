@@ -2,7 +2,8 @@ use std::{sync::Arc, time::Duration};
 
 use crate::config::AppConfig;
 use crate::database::entity::media_type::MediaType;
-use crate::db::NewMeme;
+use crate::database::entity::new_meme::NewMeme;
+use crate::database::enums::vlm_error_enum::VlmError;
 use crate::vlm;
 use crate::{
     AppState,
@@ -93,7 +94,9 @@ pub fn start_worker(
                     }
 
                     let bytes_for_ffmpeg = if frame_bytes.is_none() {
-                        println!("[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg...");
+                        println!(
+                            "[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg..."
+                        );
                         Some(image_bytes.clone())
                     } else {
                         None
@@ -157,7 +160,7 @@ pub fn start_worker(
             .await
             {
                 Ok(desc) => desc,
-                Err(vlm::VlmError::InappropriateContent(reason)) => {
+                Err(VlmError::InappropriateContent(reason)) => {
                     eprintln!(
                         "[WORKER SECURITY ALERT] Inappropriate meme rejected: {}",
                         reason
@@ -170,7 +173,7 @@ pub fn start_worker(
                     tokio::time::sleep(Duration::from_secs(4)).await;
                     continue;
                 }
-                Err(vlm::VlmError::Transient(e)) => {
+                Err(VlmError::Transient(e)) => {
                     eprintln!("[WORKER]-[ERROR] Something go wrong VLM: {}", e);
                     if job.retry_count < 2 {
                         let mut retried_job = job;

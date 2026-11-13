@@ -3,6 +3,7 @@ pub mod handlers;
 
 use crate::AppState;
 use crate::config::AppConfig;
+use crate::database::enums::command_enum::Command;
 use crate::worker::MemeJob;
 use std::sync::Arc;
 use teloxide::Bot;
@@ -19,7 +20,7 @@ pub async fn run_bot(
     sender: Sender<MemeJob>,
 ) {
     let _ = bot
-        .set_my_commands(comand::Command::bot_commands())
+        .set_my_commands(Command::bot_commands())
         .await
         .expect("Cannot set commands");
 
@@ -55,20 +56,20 @@ pub async fn message_handler(
         handlers::handle_animation(&bot, &msg, animation, state, &sender).await?;
     } else if let Some(text) = msg.text() {
         if text.starts_with('/') {
-            match comand::Command::parse(text, "") {
-                Ok(comand::Command::Start) => {
+            match Command::parse(text, "") {
+                Ok(Command::Start) => {
                     comand::start(bot, msg).await?;
                 }
-                Ok(comand::Command::Help) => {
+                Ok(Command::Help) => {
                     comand::help(bot, msg).await?;
                 }
-                Ok(comand::Command::Stats) => {
+                Ok(Command::Stats) => {
                     comand::stats(bot, msg, state).await?;
                 }
-                Ok(comand::Command::Random) => {
+                Ok(Command::Random) => {
                     comand::random(bot, msg, state).await?;
                 }
-                Ok(comand::Command::Settings) => {
+                Ok(Command::Settings) => {
                     comand::settings(bot, msg, state).await?;
                 }
                 Err(_) => {

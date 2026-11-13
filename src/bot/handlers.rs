@@ -1,7 +1,8 @@
 use crate::AppState;
 use crate::config::AppConfig;
 use crate::database::entity::media_type::MediaType;
-use crate::db::{BookMarkStatus, Meme};
+use crate::database::entity::meme::Meme;
+use crate::database::enums::book_mark_status_enum::BookMarkStatus;
 use crate::helpers::searsh_query_helper::parse_media_filter;
 use crate::worker::MemeJob;
 use std::sync::Arc;
@@ -190,7 +191,7 @@ pub async fn handle_search(
                 .await?;
         }
         Ok(results) => {
-            let valid_memes: Vec<(&crate::db::Meme, f32)> = results
+            let valid_memes: Vec<(&Meme, f32)> = results
                 .into_iter()
                 .filter(|(meme, _)| !meme.file_tg_id.is_empty())
                 .collect();

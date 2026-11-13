@@ -2,7 +2,8 @@ use std::time::SystemTime;
 
 use rusqlite::{Connection, params};
 
-use crate::{db::embedding_to_blob, engine::ClipEngine};
+use crate::engine::ClipEngine;
+use crate::helpers::embeding_helper::embedding_to_blob;
 
 pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     let mut conn = Connection::open(dp_path).map_err(|e| e.to_string())?;

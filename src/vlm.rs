@@ -5,6 +5,8 @@ use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use crate::database::enums::vlm_error_enum::VlmError;
+
 const GEMINNI_MODEL_POOL: &[&str] = &[
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
@@ -12,12 +14,6 @@ const GEMINNI_MODEL_POOL: &[&str] = &[
     "gemini-3.6-flash",
     "gemini-3.8-flash",
 ];
-
-#[derive(Debug)]
-pub enum VlmError {
-    InappropriateContent(String),
-    Transient(String),
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemeAnalysis {

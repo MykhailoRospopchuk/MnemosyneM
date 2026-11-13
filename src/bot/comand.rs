@@ -13,25 +13,8 @@ use teloxide::utils::command::BotCommands;
 use crate::AppState;
 use crate::bot::handlers::build_caption;
 use crate::database::entity::media_type::MediaType;
-use crate::db::UserSetting;
-
-#[derive(BotCommands, Clone)]
-#[command(
-    rename_rule = "lowercase",
-    description = "These commands are supported:"
-)]
-pub enum Command {
-    #[command(description = "Start a new bot")]
-    Start,
-    #[command(description = "Show list of all commands")]
-    Help,
-    #[command(description = "Get statistics of memes")]
-    Stats,
-    #[command(description = "Show meme random meme")]
-    Random,
-    #[command(description = "Set up your stuff")]
-    Settings,
-}
+use crate::database::entity::user_setting::UserSetting;
+use crate::database::enums::command_enum::Command;
 
 pub async fn start(bot: Bot, msg: Message) -> Result<Message, RequestError> {
     let message = bot
