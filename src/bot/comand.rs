@@ -12,6 +12,7 @@ use teloxide::utils::command::BotCommands;
 
 use crate::AppState;
 use crate::bot::handlers::build_caption;
+use crate::database::entity::media_type::MediaType;
 use crate::db::UserSetting;
 
 #[derive(BotCommands, Clone)]
@@ -79,16 +80,30 @@ pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Mess
     let meme_store = state.meme_store.lock().await;
     if let Some(meme) = meme_store.random_meme(msg.chat.id.0) {
         if !meme.file_tg_id.is_empty() {
-            message = bot
-                .send_photo(
-                    msg.chat.id,
-                    InputFile::file_id(FileId(meme.file_tg_id.clone())),
-                )
-                .caption(format!(
-                    "🎲 Random meme | {}",
-                    build_caption(&meme.source_title, &meme.source_url, &1.0)
-                ))
-                .await?;
+            let captions = format!(
+                "🎲 Random meme | {}",
+                build_caption(&meme.source_title, &meme.source_url, &1.0)
+            );
+            match meme.media_type {
+                MediaType::Photo => {
+                    message = bot
+                        .send_photo(
+                            msg.chat.id,
+                            InputFile::file_id(FileId(meme.file_tg_id.clone())),
+                        )
+                        .caption(captions)
+                        .await?;
+                }
+                MediaType::Animation => {
+                    message = bot
+                        .send_animation(
+                            msg.chat.id,
+                            InputFile::file_id(FileId(meme.file_tg_id.clone())),
+                        )
+                        .caption(captions)
+                        .await?;
+                }
+            }
         } else {
             message = bot
                 .send_message(msg.chat.id, "Sorry your meme somebody stole(((")
