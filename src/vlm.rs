@@ -170,14 +170,14 @@ pub async fn describe_meme(
             .as_str()
             .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
-        let clean_json = raw_text
-            .trim()
+        let trimmed = raw_text.trim();
+        let without_prefix = trimmed
             .strip_prefix("```json")
-            .unwrap_or(raw_text)
-            .strip_prefix("```")
-            .unwrap_or(raw_text)
+            .or_else(|| trimmed.strip_prefix("```"))
+            .unwrap_or(trimmed);
+        let clean_json = without_prefix
             .strip_suffix("```")
-            .unwrap_or(raw_text)
+            .unwrap_or(without_prefix)
             .trim();
         let analysis: MemeAnalysis = serde_json::from_str(clean_json).map_err(|e| {
             VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text))

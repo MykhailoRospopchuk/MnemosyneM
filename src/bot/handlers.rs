@@ -13,17 +13,27 @@ use teloxide::types::{
 };
 use tokio::sync::mpsc::Sender;
 
-pub async fn handle_photo(
+struct MediaPayload {
+    file_id: String,
+    file_unique_id: String,
+    media_type: MediaType,
+    thumbnail_file_id: Option<String>,
+}
+
+async fn enqueue_meme_job(
     bot: &Bot,
     msg: &Message,
-    photo: &PhotoSize,
+    payload: MediaPayload,
     state: Arc<AppState>,
     sender: &Sender<MemeJob>,
 ) -> ResponseResult<()> {
-    let telegram_file_id = photo.file.id.0.clone();
-    let telegram_file_unique_id = photo.file.unique_id.0.clone();
     let user_id = msg.chat.id.0;
     let caption = msg.caption().unwrap_or("").to_string();
+
+    let (label, log_tag) = match payload.media_type {
+        MediaType::Photo => ("meme", "PHOTO-HANDLER"),
+        MediaType::Animation => ("GIF", "ANIMATION-HANDLER"),
+    };
 
     let (source_title, source_url) = match msg.forward_origin() {
         Some(MessageOrigin::Channel {
@@ -45,52 +55,77 @@ pub async fn handle_photo(
 
     let check_status = {
         let mut meme_store = state.meme_store.lock().await;
-        meme_store.check_or_add_bookmark(&telegram_file_unique_id, user_id, &caption)
+        meme_store.check_or_add_bookmark(&payload.file_unique_id, user_id, &caption)
     };
 
     match check_status {
         Ok(BookMarkStatus::AlreadyInCollection) => {
-            bot.send_message(msg.chat.id, "[V] This meme already in your collection!")
-                .await?;
+            bot.send_message(
+                msg.chat.id,
+                format!("[V] This {} already in your collection!", label),
+            )
+            .await?;
             return Ok(());
         }
-        Ok(BookMarkStatus::AddetInstantly) => {
-            bot.send_message(msg.chat.id, "[V] We know your meme! Collected! ")
-                .await?;
+        Ok(BookMarkStatus::AddedInstantly) => {
+            bot.send_message(
+                msg.chat.id,
+                format!("[V] We know your {}! Collected!", label),
+            )
+            .await?;
             return Ok(());
         }
         Ok(BookMarkStatus::NewMemeNeeded) => {
-            println!("[PHOTO-HANDLER]-[INFO] someone just drop new meme!")
+            println!("[{}]-[INFO] someone just drop new {}!", log_tag, label);
         }
         Err(e) => {
-            eprintln!(
-                "[PHOTO-HANDLER]-[ERROR] Bookmark check error: {}",
-                e.to_string()
-            );
+            eprintln!("[{}]-[ERROR] Bookmark check error: {}", log_tag, e);
         }
     };
 
     let job = MemeJob {
         chat_id: msg.chat.id,
-        file_id: telegram_file_id,
-        file_unique_id: telegram_file_unique_id,
+        file_id: payload.file_id,
+        file_unique_id: payload.file_unique_id,
         captions: caption,
-        source_title: source_title,
-        source_url: source_url,
+        source_title,
+        source_url,
         retry_count: 0,
-        user_id: msg.chat.id.0,
-        media_type: MediaType::Photo,
-        thumbnail_file_id: None,
+        user_id,
+        media_type: payload.media_type,
+        thumbnail_file_id: payload.thumbnail_file_id,
     };
 
     if let Err(e) = sender.send(job).await {
-        eprintln!("[PHOTO-HANDLER]-[ERROR] Queue error: {}", e);
+        eprintln!("[{}]-[ERROR] Queue error: {}", log_tag, e);
         bot.send_message(msg.chat.id, "Queue is full, please try again later!")
             .await?;
         return Ok(());
     }
 
     Ok(())
+}
+
+pub async fn handle_photo(
+    bot: &Bot,
+    msg: &Message,
+    photo: &PhotoSize,
+    state: Arc<AppState>,
+    sender: &Sender<MemeJob>,
+) -> ResponseResult<()> {
+    enqueue_meme_job(
+        bot,
+        msg,
+        MediaPayload {
+            file_id: photo.file.id.0.clone(),
+            file_unique_id: photo.file.unique_id.0.clone(),
+            media_type: MediaType::Photo,
+            thumbnail_file_id: None,
+        },
+        state,
+        sender,
+    )
+    .await
 }
 
 pub async fn handle_animation(
@@ -100,79 +135,20 @@ pub async fn handle_animation(
     state: Arc<AppState>,
     sender: &Sender<MemeJob>,
 ) -> ResponseResult<()> {
-    let telegram_file_id = animation.file.id.0.clone();
-    let telegram_file_unique_id = animation.file.unique_id.0.clone();
-    let user_id = msg.chat.id.0;
-    let caption = msg.caption().unwrap_or("").to_string();
-
-    let (source_title, source_url) = match msg.forward_origin() {
-        Some(MessageOrigin::Channel {
-            date: _,
-            chat,
-            message_id,
-            author_signature: _,
-        }) => {
-            if let Some(username) = chat.username() {
-                let title = chat.title().unwrap_or(username).to_string();
-                let url = format!("https://t.me/{}/{}", username, message_id);
-                (title, url)
-            } else {
-                ("".to_string(), "".to_string())
-            }
-        }
-        _ => ("".to_string(), "".to_string()),
-    };
-
-    let check_status = {
-        let mut meme_store = state.meme_store.lock().await;
-        meme_store.check_or_add_bookmark(&telegram_file_unique_id, user_id, &caption)
-    };
-
-    match check_status {
-        Ok(BookMarkStatus::AlreadyInCollection) => {
-            bot.send_message(msg.chat.id, "[V] This GIF already in your collection!")
-                .await?;
-            return Ok(());
-        }
-        Ok(BookMarkStatus::AddetInstantly) => {
-            bot.send_message(msg.chat.id, "[V] We know your GIF! Collected! ")
-                .await?;
-            return Ok(());
-        }
-        Ok(BookMarkStatus::NewMemeNeeded) => {
-            println!("[ANIMATION-HANDLER]-[INFO] someone just drop new GIF!")
-        }
-        Err(e) => {
-            eprintln!(
-                "[ANIMATION-HANDLER]-[ERROR] Bookmark check error: {}",
-                e.to_string()
-            );
-        }
-    };
-
     let thumbnail_file_id = animation.thumbnail.as_ref().map(|t| t.file.id.0.clone());
-
-    let job = MemeJob {
-        chat_id: msg.chat.id,
-        file_id: telegram_file_id,
-        file_unique_id: telegram_file_unique_id,
-        captions: caption,
-        source_title: source_title,
-        source_url: source_url,
-        retry_count: 0,
-        user_id: msg.chat.id.0,
-        media_type: MediaType::Animation,
-        thumbnail_file_id: thumbnail_file_id,
-    };
-
-    if let Err(e) = sender.send(job).await {
-        eprintln!("[ANIMATION-HANDLER]-[ERROR] Queue error: {}", e);
-        bot.send_message(msg.chat.id, "Queue is full, please try again later!")
-            .await?;
-        return Ok(());
-    }
-
-    Ok(())
+    enqueue_meme_job(
+        bot,
+        msg,
+        MediaPayload {
+            file_id: animation.file.id.0.clone(),
+            file_unique_id: animation.file.unique_id.0.clone(),
+            media_type: MediaType::Animation,
+            thumbnail_file_id,
+        },
+        state,
+        sender,
+    )
+    .await
 }
 
 pub async fn handle_search(
@@ -223,9 +199,10 @@ pub async fn handle_search(
                 bot.send_message(msg.chat.id, "There is nothing useful here...")
                     .await?;
             } else {
-                let mut result_media_group: Vec<InputMedia> = Vec::new();
+                let mut photo_items: Vec<(String, String)> = Vec::new();
 
                 for (media, score) in valid_memes {
+                    let caption = build_caption(&media.source_title, &media.source_url, &score);
                     match media.media_type {
                         MediaType::Animation => {
                             if let Err(e) = bot
@@ -233,38 +210,53 @@ pub async fn handle_search(
                                     msg.chat.id,
                                     InputFile::file_id(FileId(media.file_tg_id.clone())),
                                 )
-                                .caption(build_caption(
-                                    &media.source_title,
-                                    &media.source_url,
-                                    &score,
-                                ))
+                                .caption(caption)
                                 .await
                             {
-                                eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
-                                bot.send_message(msg.chat.id, format!("Send album error: {}", e))
-                                    .await?;
+                                eprintln!("[ERROR] Telegram send_animation failed: {:?}", e);
+                                bot.send_message(
+                                    msg.chat.id,
+                                    format!("Send animation error: {}", e),
+                                )
+                                .await?;
                             }
                         }
                         MediaType::Photo => {
-                            result_media_group.push(InputMedia::Photo(
-                                InputMediaPhoto::new(InputFile::file_id(FileId(
-                                    media.file_tg_id.clone(),
-                                )))
-                                .caption(build_caption(
-                                    &media.source_title,
-                                    &media.source_url,
-                                    &score,
-                                )),
-                            ));
+                            photo_items.push((media.file_tg_id.clone(), caption));
                         }
                     }
                 }
 
-                if result_media_group.len() != 0 {
-                    if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await {
-                        eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
-                        bot.send_message(msg.chat.id, format!("Send album error: {}", e))
-                            .await?;
+                match photo_items.len() {
+                    0 => {}
+                    1 => {
+                        let (file_id, caption) = photo_items.remove(0);
+                        if let Err(e) = bot
+                            .send_photo(msg.chat.id, InputFile::file_id(FileId(file_id)))
+                            .caption(caption)
+                            .await
+                        {
+                            eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
+                            bot.send_message(msg.chat.id, format!("Send photo error: {}", e))
+                                .await?;
+                        }
+                    }
+                    _ => {
+                        let result_media_group: Vec<InputMedia> = photo_items
+                            .into_iter()
+                            .map(|(file_id, caption)| {
+                                InputMedia::Photo(
+                                    InputMediaPhoto::new(InputFile::file_id(FileId(file_id)))
+                                        .caption(caption),
+                                )
+                            })
+                            .collect();
+                        if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await
+                        {
+                            eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
+                            bot.send_message(msg.chat.id, format!("Send album error: {}", e))
+                                .await?;
+                        }
                     }
                 }
             }
@@ -310,7 +302,7 @@ pub async fn handle_inline_query(
 
     if clean_query.is_empty() {
         let meme_store = state.meme_store.lock().await;
-        let recent_memes = meme_store.get_recent_memes(user_id, 5);
+        let recent_memes = meme_store.get_recent_memes(user_id, app_config.top_k, media_filter);
 
         let result: Vec<InlineQueryResult> = recent_memes
             .into_iter()

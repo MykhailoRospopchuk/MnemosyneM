@@ -541,7 +541,7 @@ Meme ID: 1793041234
   - [ ] Worker image download retry loop with backoff on Telegram network resets.
   - [ ] Multi-shape VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, and flexible booleans (`"false"`, `0`).
   - [ ] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
-  - [ ] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
+  - [x] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
   - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
   - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.

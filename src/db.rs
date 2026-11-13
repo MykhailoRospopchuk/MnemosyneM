@@ -49,8 +49,22 @@ pub struct UserSetting {
 
 pub enum BookMarkStatus {
     AlreadyInCollection,
-    AddetInstantly,
+    AddedInstantly,
     NewMemeNeeded,
+}
+
+pub struct NewMeme<'a> {
+    pub id: u64,
+    pub title: String,
+    pub analysis: &'a crate::vlm::MemeAnalysis,
+    pub file_tg_id: String,
+    pub file_tg_unique_id: String,
+    pub user_id: i64,
+    pub source_title: String,
+    pub source_url: String,
+    pub phash: u64,
+    pub media_type: MediaType,
+    pub thumbnail_tg_id: String,
 }
 
 impl Default for UserSetting {
@@ -117,7 +131,7 @@ impl MemeStore {
                 }
             }
 
-            return Ok(BookMarkStatus::AddetInstantly);
+            return Ok(BookMarkStatus::AddedInstantly);
         }
 
         Ok(BookMarkStatus::NewMemeNeeded)
@@ -125,21 +139,17 @@ impl MemeStore {
 
     pub fn add_from_analysis(
         &mut self,
-        id: u64,
-        title: String,
-        analysis: &crate::vlm::MemeAnalysis,
-        file_tg_id: String,
-        file_tg_unique_id: String,
-        user_id: i64,
-        source_title: String,
-        source_url: String,
+        new_meme: NewMeme<'_>,
         engine: &mut ClipEngine,
-        phash: u64,
-        media_type: MediaType,
-        thumbnail_tg_id: String,
     ) -> Result<(), String> {
-        let passage_uk = format!("{} | {}", analysis.ocr_text, analysis.uk_description);
-        let passage_en = format!("{} | {}", analysis.ocr_text, analysis.en_description);
+        let passage_uk = format!(
+            "{} | {}",
+            new_meme.analysis.ocr_text, new_meme.analysis.uk_description
+        );
+        let passage_en = format!(
+            "{} | {}",
+            new_meme.analysis.ocr_text, new_meme.analysis.en_description
+        );
 
         let embed_uk = engine
             .embed_passage(&passage_uk)
@@ -148,7 +158,7 @@ impl MemeStore {
             .embed_passage(&passage_en)
             .map_err(|e| e.to_string())?;
 
-        let is_public = self.get_user_settings(user_id).upload_as_public;
+        let is_public = self.get_user_settings(new_meme.user_id).upload_as_public;
 
         let blob_uk = self::embedding_to_blob(&embed_uk);
         let blob_en = self::embedding_to_blob(&embed_en);
@@ -180,20 +190,20 @@ impl MemeStore {
                     media_type = excluded.media_type,
                     thumbnail_tg_id = excluded.thumbnail_tg_id;",
                 params![
-                    id,
-                    title,
-                    analysis.ocr_text,
-                    analysis.uk_description,
-                    analysis.en_description,
+                    new_meme.id,
+                    new_meme.title,
+                    new_meme.analysis.ocr_text,
+                    new_meme.analysis.uk_description,
+                    new_meme.analysis.en_description,
                     blob_uk,
                     blob_en,
-                    file_tg_id,
-                    file_tg_unique_id,
-                    source_title,
-                    source_url,
-                    phash as i64,
-                    media_type.as_i32(),
-                    thumbnail_tg_id
+                    new_meme.file_tg_id,
+                    new_meme.file_tg_unique_id,
+                    new_meme.source_title,
+                    new_meme.source_url,
+                    new_meme.phash as i64,
+                    new_meme.media_type.as_i32(),
+                    new_meme.thumbnail_tg_id
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -202,24 +212,24 @@ impl MemeStore {
             INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
             VALUES (?, ?, ?, ?, ?)",
             params![
-                user_id, id, title, is_public, now
+                new_meme.user_id, new_meme.id, new_meme.title, is_public, now
             ]).map_err(|e| e.to_string())?;
 
         let meme = Meme {
-            id,
-            title,
-            ocr_text: analysis.ocr_text.clone(),
+            id: new_meme.id,
+            title: new_meme.title,
+            ocr_text: new_meme.analysis.ocr_text.clone(),
             embedding_uk: embed_uk,
             embedding_en: embed_en,
-            file_tg_id,
-            file_tg_unique_id,
-            source_title,
-            source_url,
+            file_tg_id: new_meme.file_tg_id,
+            file_tg_unique_id: new_meme.file_tg_unique_id,
+            source_title: new_meme.source_title,
+            source_url: new_meme.source_url,
             is_public,
-            owners: vec![user_id],
-            phash,
-            media_type,
-            thumbnail_tg_id,
+            owners: vec![new_meme.user_id],
+            phash: new_meme.phash,
+            media_type: new_meme.media_type,
+            thumbnail_tg_id: new_meme.thumbnail_tg_id,
         };
 
         if let Some(item) = self
@@ -249,7 +259,7 @@ impl MemeStore {
             }
         }
 
-        return (public, private);
+        (public, private)
     }
 
     pub fn len_all(&self) -> usize {
@@ -282,11 +292,10 @@ impl MemeStore {
 
         let idx = nanos % count_matched;
 
-        return self
-            .memes
+        self.memes
             .iter()
             .filter(|i| i.is_visible_to(user_id, "all"))
-            .nth(idx);
+            .nth(idx)
     }
 
     pub fn open(db_connection: &str) -> Result<Self, String> {
@@ -413,7 +422,8 @@ impl MemeStore {
 
         drop(um_stmt);
 
-        let memes: Vec<Meme> = memes_map.into_values().collect();
+        let mut memes: Vec<Meme> = memes_map.into_values().collect();
+        memes.sort_by_key(|m| m.id);
 
         let mut user_smpt = conn
             .prepare("SELECT user_id, username, search_scope, upload_as_public, first_name, last_name FROM users")
@@ -442,10 +452,8 @@ impl MemeStore {
             .map_err(|e| e.to_string())?;
 
         let mut useres: HashMap<i64, UserSetting> = HashMap::new();
-        for user in user_iter {
-            if let Ok(u) = user {
-                useres.insert(u.user_id, u);
-            }
+        for u in user_iter.flatten() {
+            useres.insert(u.user_id, u);
         }
 
         drop(user_smpt);
@@ -566,14 +574,32 @@ impl MemeStore {
         Ok(())
     }
 
-    pub fn get_recent_memes(&self, user_id: i64, limit: usize) -> Vec<&Meme> {
+    pub fn get_recent_memes(
+        &self,
+        user_id: i64,
+        limit: usize,
+        media_filter: Option<MediaType>,
+    ) -> Vec<&Meme> {
         let settings = self.get_user_settings(user_id);
-        self.memes
-            .iter()
-            .rev()
-            .filter(|m| m.is_visible_to(user_id, &settings.search_scope))
-            .take(limit)
-            .collect()
+
+        match media_filter {
+            Some(filter) => self
+                .memes
+                .iter()
+                .rev()
+                .filter(|m| {
+                    m.is_visible_to(user_id, &settings.search_scope) && m.media_type == filter
+                })
+                .take(limit)
+                .collect(),
+            None => self
+                .memes
+                .iter()
+                .rev()
+                .filter(|m| m.is_visible_to(user_id, &settings.search_scope))
+                .take(limit)
+                .collect(),
+        }
     }
 
     pub fn search_top_k<'a>(
@@ -617,7 +643,7 @@ impl MemeStore {
         )
     }
 
-    pub fn find_duplicate_by_path(
+    pub fn find_duplicate_by_phash(
         &self,
         target_phash: u64,
         max_distance: u32,
@@ -646,7 +672,7 @@ impl MemeStore {
         best_match
     }
 
-    pub fn link_exiting_meme(
+    pub fn link_existing_meme(
         &mut self,
         meme_id: u64,
         user_id: i64,

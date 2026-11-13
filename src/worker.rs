@@ -2,6 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use crate::config::AppConfig;
 use crate::database::entity::media_type::MediaType;
+use crate::db::NewMeme;
 use crate::vlm;
 use crate::{
     AppState,
@@ -63,17 +64,18 @@ pub fn start_worker(
 
             let phash = match job.media_type {
                 MediaType::Photo => {
-                    let phash = match compute_hash(&image_bytes) {
-                        Ok(phash) => phash,
-                        Err(e) => {
-                            eprintln!(
-                                "[WORKER]-[WARN] Failed to compute hash for image: {}",
-                                e.to_string()
-                            );
+                    let bytes = image_bytes.clone();
+                    match tokio::task::spawn_blocking(move || compute_hash(&bytes)).await {
+                        Ok(Ok(phash)) => phash,
+                        Ok(Err(e)) => {
+                            eprintln!("[WORKER]-[WARN] Failed to compute hash for image: {}", e);
                             0
                         }
-                    };
-                    phash
+                        Err(e) => {
+                            eprintln!("[WORKER]-[WARN] Blocking hash task panicked: {}", e);
+                            0
+                        }
+                    }
                 }
                 MediaType::Animation => {
                     let mut frame_bytes = None;
@@ -90,17 +92,21 @@ pub fn start_worker(
                         }
                     }
 
-                    let jpeg_bytes = match frame_bytes {
-                        Some(b) => Some(b),
-                        None => {
-                            println!("[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg...");
-                            extract_frame_from_video(&image_bytes).ok()
-                        }
+                    let bytes_for_ffmpeg = if frame_bytes.is_none() {
+                        println!("[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg...");
+                        Some(image_bytes.clone())
+                    } else {
+                        None
                     };
 
-                    jpeg_bytes
-                        .and_then(|b| compute_hash(&b).ok())
-                        .unwrap_or(0)
+                    tokio::task::spawn_blocking(move || {
+                        let jpeg_bytes = frame_bytes.or_else(|| {
+                            bytes_for_ffmpeg.and_then(|b| extract_frame_from_video(&b).ok())
+                        });
+                        jpeg_bytes.and_then(|b| compute_hash(&b).ok()).unwrap_or(0)
+                    })
+                    .await
+                    .unwrap_or(0)
                 }
             };
 
@@ -113,14 +119,14 @@ pub fn start_worker(
                 let mut store = state.meme_store.lock().await;
 
                 if let Some((exiting_meme_id, distance)) =
-                    store.find_duplicate_by_path(phash, app_config.max_phash_distance)
+                    store.find_duplicate_by_phash(phash, app_config.max_phash_distance)
                 {
                     println!(
                         "[WORKER] Duplicate meme detected by pHash. Matched meme [{}] | distance [{distance}])! Skipping Gemini VLM",
                         exiting_meme_id
                     );
 
-                    match store.link_exiting_meme(exiting_meme_id, job.user_id, &job.captions) {
+                    match store.link_existing_meme(exiting_meme_id, job.user_id, &job.captions) {
                         Ok(is_new_for_user) => {
                             let text = if is_new_for_user {
                                 "[D] This meme already persist in DB (> 92%)! Added immediattely to your collection"
@@ -209,18 +215,20 @@ pub fn start_worker(
             let mut meme_store = state.meme_store.lock().await;
 
             match meme_store.add_from_analysis(
-                id,
-                user_title,
-                &analysis,
-                job.file_id,
-                job.file_unique_id,
-                job.user_id,
-                job.source_title,
-                job.source_url,
+                NewMeme {
+                    id,
+                    title: user_title,
+                    analysis: &analysis,
+                    file_tg_id: job.file_id,
+                    file_tg_unique_id: job.file_unique_id,
+                    user_id: job.user_id,
+                    source_title: job.source_title,
+                    source_url: job.source_url,
+                    phash,
+                    media_type: job.media_type,
+                    thumbnail_tg_id: job.thumbnail_file_id.unwrap_or_default(),
+                },
                 &mut engine,
-                phash,
-                job.media_type,
-                job.thumbnail_file_id.unwrap_or("".to_string()),
             ) {
                 Ok(()) => {
                     println!("[WORKER] Sucessfully saved in SQLite!");

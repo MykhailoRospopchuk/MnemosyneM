@@ -66,10 +66,16 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
         }
 
         let phash = match media_type {
-            MediaType::Photo => compute_hash(&file_bytes),
-            MediaType::Animation => {
+            MediaType::Photo => tokio::task::spawn_blocking(move || compute_hash(&file_bytes))
+                .await
+                .map_err(|e| format!("Blocking task panicked: {}", e))
+                .and_then(|res| res),
+            MediaType::Animation => tokio::task::spawn_blocking(move || {
                 extract_frame_from_video(&file_bytes).and_then(|frame| compute_hash(&frame))
-            }
+            })
+            .await
+            .map_err(|e| format!("Blocking task panicked: {}", e))
+            .and_then(|res| res),
         };
 
         let phash = match phash {
