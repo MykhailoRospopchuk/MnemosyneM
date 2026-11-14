@@ -25,6 +25,7 @@ flowchart TD
         Logging["Structured Logging (tracing + timestamps + user attribution)"]
         Resilience["Startup & Network Resilience (retry loops, non-fatal command setup, token masking)"]
         GIFs["GIF & Animation Support (Telegram MP4 + Gemini Video VLM)"]
+        Search["Search Quality Overhaul (Clean Lexical + FTS5/BM25 + TextRerank)"]
     end
 
     subgraph M3 ["v0.3: Content Moderation & Admin"]
@@ -446,7 +447,35 @@ Meme ID: 1793041234
 
 ---
 
-## 🚀 Milestone 9: High-Performance Vector Engine from Scratch (v0.4)
+## 🔍 Milestone 9: Search Quality Overhaul — Hybrid Retrieval & Cross-Encoder Reranking (v0.2 — Top Priority)
+> **Goal:** Eliminate irrelevant Top-K noise on short queries (1–4 words), visual scene searches, and conceptual paraphrases, backed by empirical findings in [docs/search-research/](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/docs/search-research/README.md).
+
+### 9.1. Root Causes Identified (`mnemosynem_v2.db`, `N = 1,237`)
+1. **UTF-8 byte-length + substring bug in [`find_top_k`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L694-L724):** `w.len() >= 3` passes every 2-letter Cyrillic preposition (`"на"`, `"до"`, `"за"` = 4 bytes), and `.contains(w)` triggers spurious boosts inside unrelated words (`"на"` inside `"частиНАми"`, `"СвіНАбони"`; `"очі"` inside `"ВНОЧІ"`).
+2. **E5 cosine anisotropy + dead `> 0.05` floor:** Random meme pairs average `0.8175` cosine and nonsense queries score up to `0.8145`; `> 0.05` lets 100% of visible memes pass, padding `TOP_K` with random filler when only 1–2 relevant memes exist.
+3. **Short-query vs long-passage Mean Pooling dilution:** Queries average 2–4 words while `ocr_text | description_uk` averages `66.7` words (33.9% framing boilerplate, 14.4% Markdown layout tags in `ocr_text`), drowning single-sentence punchlines.
+4. **Search-time `phash` duplicates & missing inflection matching:** Duplicate `phash` entries occupy multiple `TOP_K` slots, and raw substring checks fail Ukrainian inflections (`"касі"` vs `"касах"`).
+
+### 9.2. Phased Implementation Plan
+* **Phase 0 — Immediate Fixes (Zero New Models, Zero DB Migration):**
+  * Replace `w.len() >= 3` with `w.chars().count() >= 3`, filter Ukrainian/English stopwords, tokenize on non-alphanumeric boundaries (`!c.is_alphanumeric()`), and apply light stem/prefix matching (`>= 4` chars) over clean `ocr_text` + non-spam `title`.
+  * Deduplicate ranked results by `phash` within `MAX_PHASH_DISTANCE` at search time so clones never consume multiple `TOP_K` slots.
+  * Replace `> 0.05` with relative score-gap cutoff from Top-1 (`top1 - 0.032` for unconfirmed tails) + weak-result guard.
+  * Tighten VLM prompt in [`src/vlm.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/vlm.rs#L77-L94): ban Markdown layout tags in `ocr_text` and framing boilerplate while preserving concise scene, punchline, and Ukrainian keywords.
+* **Phase 1A — Hybrid Stage-1 Retrieval (SQLite FTS5 / BM25 + Vector):**
+  * Leverage `rusqlite` `bundled` FTS5 (`-DSQLITE_ENABLE_FTS5` verified active) to index normalized/lightly-stemmed tokens across `ocr_text`, `description_uk`, `description_en`, and `title`.
+  * Generate a unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) — avoiding naive equal-weight RRF which degrades zero-overlap synonym recall (`25% -> 0%`).
+* **Phase 1B — Stage-2 Cross-Encoder Reranking (`fastembed::TextRerank`):**
+  * Benchmark `RerankerModel::JINARerankerV2BaseMultiligual` (~1.1 GB, safer for 12 GiB hosts) vs `RerankerModel::BGERerankerV2M3` (~2.2 GB) on latency (`p50`/`p95` over 15–20 candidates) and RSS memory.
+  * Release `meme_store` mutex immediately after Stage-1 candidate fetch; run `TextRerank` inside `tokio::task::spawn_blocking` under a dedicated lock so async polling and ingestion workers never stall.
+  * Apply calibrated Cross-Encoder logit threshold for true negative rejection ("nothing relevant found" on out-of-domain queries).
+* **Phase 2 — Golden Evaluation Suite & Future Multi-Vector / `BGEM3Q`:**
+  * Codify golden benchmark queries (`standard`, `syn_zero`, `NEGATIVE`) to track `Hit@3`, `MRR`, and false-positive rejection across changes.
+  * Evaluate structured 3-vector blending (`holistic + scene + meaning`, avoiding naive sentence-max noise) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
+
+---
+
+## 🚀 Milestone 10: High-Performance Vector Engine from Scratch (v0.4)
 > **Target:** Senior Systems Rust / High-Performance Engineering Portfolio Piece.
 
 ### 🎯 Portfolio Elevator Pitch for CV:
@@ -454,7 +483,7 @@ Meme ID: 1793041234
 
 ---
 
-### 9.1. SIMD AVX2 / FMA Vector Math Kernel
+### 10.1. SIMD AVX2 / FMA Vector Math Kernel
 * **Current State:** Scalar iterator `a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()`.
 * **SIMD Architecture:**
   * Uses 256-bit `YMM` registers via `core::arch::x86_64`.
@@ -468,7 +497,7 @@ Meme ID: 1793041234
 
 ---
 
-### 9.2. HNSW (Hierarchical Navigable Small World) Graph Index
+### 10.2. HNSW (Hierarchical Navigable Small World) Graph Index
 * **Current State:** Brute-force Flat KNN ($O(N)$ linear scan over all memes).
 * **HNSW Architecture:**
   * Multi-layer skip-list inspired graph of vector nodes:
@@ -481,7 +510,7 @@ Meme ID: 1793041234
 
 ---
 
-### 9.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
+### 10.3. Custom Zero-Copy Memory-Mapped Vector Storage (`mmap`)
 * **Current State:** 3072-byte Little-Endian BLOBs stored inside SQLite rows.
 * **New Storage Engine (`.vec` format):**
   * Dedicated append-only binary vector file with structured header:
@@ -499,7 +528,7 @@ Meme ID: 1793041234
 
 ---
 
-### 9.4. Scalar Quantization (SQ8) *(Optional Optimization)*
+### 10.4. Scalar Quantization (SQ8) *(Optional Optimization)*
 * Compresses 32-bit float vectors (`f32`, 3072 bytes per vector) into 8-bit unsigned integers (`u8`, 768 bytes per vector).
 * Achieves **75% RAM reduction** while maintaining $>98\%$ recall accuracy.
 * Enables integer SIMD instructions (`_mm256_maddubs_epi16`).
@@ -542,6 +571,21 @@ Meme ID: 1793041234
   - [x] Multi-shape VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, and flexible booleans (`"false"`, `0`).
   - [x] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
   - [x] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
+  - [ ] **🔥 Search Quality & Hybrid Retrieval Overhaul (TOP PRIORITY — see `docs/search-research/`):**
+    - [ ] **Phase 0 (Quick Wins):**
+      - [x] Fix `ocr_text` boost in `find_top_k`: use `w.chars().count() >= 3` instead of UTF-8 byte `.len()`, add UA/EN stopwords list, and match whole normalized tokens / light prefix stems instead of raw `.contains()`.
+      - [ ] Search-time `phash` deduplication in `find_top_k` (`MAX_PHASH_DISTANCE`) so clone memes never occupy multiple `TOP_K` slots.
+      - [ ] Replace `best_score > 0.05` with relative score-gap cutoff from Top-1 (`gap_cutoff`) + weak-result guard.
+      - [ ] Refactor VLM prompt in `src/vlm.rs`: forbid Markdown layout tags (`*Top text:*`) and prose boilerplate; enforce concise scene + joke meaning + Ukrainian keywords.
+    - [ ] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
+      - [ ] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title`, kept in sync on inserts/updates.
+      - [ ] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
+    - [ ] **Phase 1B (Stage-2 Cross-Encoder Reranking):**
+      - [ ] Benchmark `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` vs `BGERerankerV2M3`) for p50/p95 CPU latency on 15–20 candidates and RSS memory budget.
+      - [ ] Integrate `TextRerank` in `tokio::task::spawn_blocking` under a dedicated lock (releasing `meme_store` mutex before inference) + calibrated negative-rejection threshold.
+    - [ ] **Phase 2 (Evaluation & Long-Term Scaling):**
+      - [ ] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
+      - [ ] Evaluate structured 3-vector blending (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
   - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
   - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.

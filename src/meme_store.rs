@@ -10,7 +10,10 @@ use crate::{
         enums::book_mark_status_enum::BookMarkStatus,
     },
     engine::ClipEngine,
-    helpers::embeding_helper::{blob_to_embedding, embedding_to_blob},
+    helpers::{
+        embeding_helper::{blob_to_embedding, embedding_to_blob},
+        lexical_helper::{count_lexical_matches, extract_stemmed_terms},
+    },
 };
 
 #[derive(Debug)]
@@ -691,11 +694,8 @@ fn find_top_k<'a>(
     media_filter: Option<MediaType>,
 ) -> Vec<(&'a Meme, f32)> {
     let mut top_k: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
-    let query_lower = query_text.to_lowercase();
-    let query_words: Vec<&str> = query_lower
-        .split_whitespace()
-        .filter(|w| w.len() >= 3)
-        .collect();
+
+    let query_terms = extract_stemmed_terms(query_text);
     for meme in memes {
         if !meme.is_visible_to(user_id, &scope_visible) {
             continue;
@@ -711,14 +711,10 @@ fn find_top_k<'a>(
         let sim_en = cosine_similarity(query, &meme.embedding_en).unwrap_or(0.0);
         let mut best_score = f32::max(sim_uk, sim_en);
 
-        if !meme.ocr_text.is_empty() && !query_words.is_empty() {
-            let ocr_lower = meme.ocr_text.to_lowercase();
-            let matches = query_words
-                .iter()
-                .filter(|&&w| ocr_lower.contains(w))
-                .count();
+        if !meme.ocr_text.is_empty() && !query_terms.is_empty() {
+            let matches = count_lexical_matches(&query_terms, &meme.ocr_text);
             if matches > 0 {
-                let boost = 0.04 * (matches as f32 / query_words.len() as f32);
+                let boost = 0.04 * (matches as f32 / query_terms.len() as f32);
                 best_score = (best_score + boost).min(1.0);
             }
         }
