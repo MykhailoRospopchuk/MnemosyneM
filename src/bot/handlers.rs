@@ -182,7 +182,7 @@ pub async fn handle_search(
     match meme_store.search_top_k(
         &clean_query,
         &mut engine,
-        app_config.top_k,
+        app_config,
         msg.chat.id.0,
         media_filter,
     ) {
@@ -354,24 +354,20 @@ pub async fn handle_inline_query(
     let mut engine = state.engine.lock().await;
     let meme_store = state.meme_store.lock().await;
 
-    let results = match meme_store.search_top_k(
-        &clean_query,
-        &mut engine,
-        app_config.top_k,
-        user_id,
-        media_filter,
-    ) {
-        Ok(matches) => matches
-            .into_iter()
-            .enumerate()
-            .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
-            .map(|(idx, (meme, score))| make_inline_result(idx, meme, score))
-            .collect(),
-        Err(e) => {
-            eprintln!("[ERROR] Inline search error: {}", e);
-            vec![]
-        }
-    };
+    let results =
+        match meme_store.search_top_k(&clean_query, &mut engine, app_config, user_id, media_filter)
+        {
+            Ok(matches) => matches
+                .into_iter()
+                .enumerate()
+                .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
+                .map(|(idx, (meme, score))| make_inline_result(idx, meme, score))
+                .collect(),
+            Err(e) => {
+                eprintln!("[ERROR] Inline search error: {}", e);
+                vec![]
+            }
+        };
 
     if let Err(e) = bot
         .answer_inline_query(query.id, results)

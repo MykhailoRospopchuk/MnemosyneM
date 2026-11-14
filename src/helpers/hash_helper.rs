@@ -40,6 +40,10 @@ pub fn extract_frame_from_video(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
+pub fn hamming_distance(a: u64, b: u64) -> u32 {
+    (a ^ b).count_ones()
+}
+
 fn run_ffmpeg_pipe(video_bytes: &[u8]) -> Result<Vec<u8>, String> {
     let mut child = Command::new("ffmpeg")
         .args([

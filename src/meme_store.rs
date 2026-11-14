@@ -1,3 +1,4 @@
+use crate::config::AppConfig;
 use rusqlite::{Connection, params};
 use std::{collections::HashMap, time::SystemTime};
 
@@ -12,6 +13,7 @@ use crate::{
     engine::ClipEngine,
     helpers::{
         embeding_helper::{blob_to_embedding, embedding_to_blob},
+        hash_helper::hamming_distance,
         lexical_helper::{count_lexical_matches, extract_stemmed_terms},
     },
 };
@@ -535,7 +537,7 @@ impl MemeStore {
         &'a self,
         query_text: &str,
         engine: &mut ClipEngine,
-        k: usize,
+        app_config: &AppConfig,
         user_id: i64,
         media_filter: Option<MediaType>,
     ) -> Result<Vec<(&'a Meme, f32)>, String> {
@@ -544,7 +546,7 @@ impl MemeStore {
         let top_k = self.find_top_k(
             &embed,
             query_text,
-            k,
+            app_config,
             user_id,
             settings.search_scope,
             media_filter,
@@ -556,7 +558,7 @@ impl MemeStore {
         &self,
         query: &[f32],
         query_text: &str,
-        k: usize,
+        app_config: &AppConfig,
         user_id: i64,
         scope_visibility: String,
         media_filter: Option<MediaType>,
@@ -565,7 +567,7 @@ impl MemeStore {
             query,
             query_text,
             &self.memes,
-            k,
+            app_config,
             user_id,
             scope_visibility,
             media_filter,
@@ -584,7 +586,7 @@ impl MemeStore {
                 continue;
             }
 
-            let distance = (meme.phash ^ target_phash).count_ones();
+            let distance = hamming_distance(meme.phash, target_phash);
             if distance <= max_distance {
                 match best_match {
                     Some((_, best_dist)) if distance < best_dist => {
@@ -688,12 +690,12 @@ fn find_top_k<'a>(
     query: &[f32],
     query_text: &str,
     memes: &'a [Meme],
-    k: usize,
+    app_config: &AppConfig,
     user_id: i64,
     scope_visible: String,
     media_filter: Option<MediaType>,
 ) -> Vec<(&'a Meme, f32)> {
-    let mut top_k: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
+    let mut selected_memes: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
 
     let query_terms = extract_stemmed_terms(query_text);
     for meme in memes {
@@ -719,10 +721,150 @@ fn find_top_k<'a>(
             }
         }
         if best_score > 0.05 {
-            top_k.push((meme, best_score));
+            selected_memes.push((meme, best_score));
         }
     }
-    top_k.sort_by(|b, a| a.1.total_cmp(&b.1));
-    top_k.truncate(k);
-    top_k
+    selected_memes.sort_by(|b, a| a.1.total_cmp(&b.1));
+    deduplicate_by_phash(
+        selected_memes,
+        app_config.top_k,
+        app_config.max_phash_distance,
+    )
+}
+
+fn deduplicate_by_phash<'a>(
+    sorted_memes: Vec<(&'a Meme, f32)>,
+    limit: usize,
+    max_distance: u32,
+) -> Vec<(&'a Meme, f32)> {
+    let mut selected_memes: Vec<(&'a Meme, f32)> = Vec::with_capacity(limit);
+    let mut seen_phash: Vec<u64> = Vec::with_capacity(limit);
+
+    for (meme, score) in sorted_memes {
+        if meme.phash != 0
+            && seen_phash
+                .iter()
+                .any(|&h| hamming_distance(h, meme.phash) <= max_distance)
+        {
+            continue;
+        }
+
+        if meme.phash != 0 {
+            seen_phash.push(meme.phash);
+        }
+
+        selected_memes.push((meme, score));
+
+        if selected_memes.len() == limit {
+            break;
+        }
+    }
+
+    selected_memes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_test_meme(id: u64, phash: u64, ocr_text: &str, embedding_uk: Vec<f32>) -> Meme {
+        Meme {
+            id,
+            title: String::new(),
+            ocr_text: ocr_text.to_string(),
+            embedding_uk,
+            embedding_en: vec![0.0, 1.0],
+            file_tg_id: format!("tg_{}", id),
+            file_tg_unique_id: format!("uniq_{}", id),
+            source_title: String::new(),
+            source_url: String::new(),
+            is_public: true,
+            owners: vec![1],
+            phash,
+            media_type: MediaType::Photo,
+            thumbnail_tg_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn deduplicate_by_phash_skips_near_clones_and_keeps_top_score() {
+        let m1 = make_test_meme(1, 0b1111_1111, "", vec![1.0, 0.0]);
+        let m2 = make_test_meme(2, 0b1111_1100, "", vec![1.0, 0.0]); // hamming = 2 <= 5
+        let m3 = make_test_meme(3, 0xFFFF_0000_0000_0000, "", vec![1.0, 0.0]);
+        let m4 = make_test_meme(4, 0x0000_FFFF_0000_0000, "", vec![1.0, 0.0]);
+
+        let candidates = vec![(&m1, 0.90), (&m2, 0.88), (&m3, 0.85), (&m4, 0.82)];
+        let selected = deduplicate_by_phash(candidates, 3, 5);
+        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+
+        assert_eq!(ids, vec![1, 3, 4]);
+    }
+
+    #[test]
+    fn deduplicate_by_phash_preserves_unhashed_memes() {
+        let m1 = make_test_meme(10, 0, "", vec![1.0, 0.0]);
+        let m2 = make_test_meme(20, 0, "", vec![1.0, 0.0]);
+
+        let candidates = vec![(&m1, 0.90), (&m2, 0.85)];
+        let selected = deduplicate_by_phash(candidates, 3, 5);
+        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+
+        assert_eq!(ids, vec![10, 20]);
+    }
+
+    #[test]
+    fn deduplicate_by_phash_keeps_memes_above_distance_threshold() {
+        let m1 = make_test_meme(1, 0b0000_0000, "", vec![1.0, 0.0]);
+        let m2 = make_test_meme(2, 0b0011_1111, "", vec![1.0, 0.0]); // hamming = 6 > 5
+
+        let candidates = vec![(&m1, 0.90), (&m2, 0.85)];
+        let selected = deduplicate_by_phash(candidates, 3, 5);
+        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+
+        assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn find_top_k_deduplicates_clones_and_avoids_false_substring_boost() {
+        let cfg = AppConfig {
+            db_path: String::new(),
+            top_k: 2,
+            gemini_api_key: String::new(),
+            max_phash_distance: 5,
+        };
+
+        let clone_a = make_test_meme(
+            1,
+            0xAAAA_AAAA_AAAA_AAAA,
+            "шоколадки на касах",
+            vec![0.9, 0.1],
+        );
+        let clone_b = make_test_meme(
+            2,
+            0xAAAA_AAAA_AAAA_AAAB,
+            "шоколадки на касах",
+            vec![0.89, 0.11],
+        );
+
+        let svinabony = make_test_meme(3, 0x1111_2222_3333_4444, "Свінабони", vec![0.88, 0.12]);
+
+        let memes = vec![clone_a, clone_b, svinabony];
+        let query_vec = vec![0.9, 0.1];
+
+        let results = find_top_k(
+            &query_vec,
+            "шоколадки на касі",
+            &memes,
+            &cfg,
+            1,
+            "all".to_string(),
+            None,
+        );
+
+        let ids: Vec<u64> = results.iter().map(|(m, _)| m.id).collect();
+        assert_eq!(ids, vec![1, 3]);
+        assert!(
+            (results[1].1 - cosine_similarity(&query_vec, &[0.88, 0.12]).unwrap()).abs() < 1e-5
+        );
+    }
 }
