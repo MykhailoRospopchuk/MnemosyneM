@@ -1,0 +1,169 @@
+pub fn extract_stemmed_terms(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = text
+        .to_lowercase()
+        .replace(['\'', '’', 'ʼ', '`'], "")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 3 && !STOPWORDS.contains(t))
+        .map(light_stem)
+        .collect();
+
+    tokens.sort();
+    tokens.dedup();
+    tokens
+}
+
+pub fn count_lexical_matches(query_terms: &[String], doc_text: &str) -> usize {
+    let doc_terms = extract_stemmed_terms(doc_text);
+    query_terms
+        .iter()
+        .filter(|q| doc_terms.iter().any(|d| d == *q))
+        .count()
+}
+
+fn light_stem(token: &str) -> String {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() <= 3 {
+        return token.to_string();
+    }
+
+    const LONG_SUFFIXES: &[&str] = &[
+        "ами", "ями", "ові", "еві", "ого", "ому", "ими", "іми", "ах", "ях", "ів", "їв", "ої", "ою",
+        "ею", "єю", "ння", "ти", "ся", "ть", "ing", "ed", "es",
+    ];
+    for suffix in LONG_SUFFIXES {
+        if let Some(stem) = token.strip_suffix(suffix)
+            && stem.chars().count() >= 3
+        {
+            return stem.to_string();
+        }
+    }
+
+    const SHORT_ENDINGS: &[char] = &['а', 'я', 'у', 'ю', 'і', 'ї', 'е', 'о', 'и', 'й', 's'];
+    if chars.len() >= 4 && SHORT_ENDINGS.contains(chars.last().unwrap()) {
+        return chars[..chars.len() - 1].iter().collect();
+    }
+    token.to_string()
+}
+
+const STOPWORDS: &[&str] = &[
+    // UA
+    "для",
+    "про",
+    "при",
+    "під",
+    "над",
+    "без",
+    "між",
+    "через",
+    "після",
+    "перед",
+    "коли",
+    "хто",
+    "кого",
+    "кому",
+    "ким",
+    "що",
+    "чого",
+    "чому",
+    "чим",
+    "який",
+    "яка",
+    "яке",
+    "які",
+    "але",
+    "або",
+    "так",
+    "вже",
+    "ще",
+    "тут",
+    "там",
+    "він",
+    "вона",
+    "воно",
+    "вони",
+    "його",
+    "її",
+    "їх",
+    "мені",
+    "тебе",
+    "себе",
+    "мій",
+    "твій",
+    "свій",
+    "цей",
+    "того",
+    "той",
+    "всі",
+    "все",
+    "був",
+    "була",
+    "було",
+    "були",
+    "буде",
+    "нема",
+    "ніж",
+    "щоб",
+    "аби",
+    "ось",
+    "коли",
+    "тільки",
+    "навіть",
+    "просто",
+    "дуже",
+    // EN
+    "the",
+    "and",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "you",
+    "your",
+    "are",
+    "was",
+    "were",
+    "not",
+    "but",
+    "can",
+    "have",
+    "has",
+    "had",
+    "just",
+    "like",
+    "what",
+    "when",
+    "how",
+    "who",
+    "all",
+    "out",
+];
+
+#[cfg(test)]
+mod lexical_helper_tests {
+    use super::*;
+
+    #[test]
+    fn extract_stemmed_terms_test() {
+        let tokens = extract_stemmed_terms("*п’ятниця* «клоді»");
+
+        assert_eq!(extract_stemmed_terms("шоколадки на касі").len(), 2);
+        assert!(tokens.contains(&"клод".to_string()));
+        assert!(tokens.contains(&"пятниц".to_string()));
+    }
+
+    #[test]
+    fn count_lexical_matches_test() {
+        let tokens = extract_stemmed_terms("шоколадки на касі");
+
+        assert_eq!(count_lexical_matches(&tokens, "Свінабони"), 0);
+        assert_eq!(count_lexical_matches(&tokens, "оплата частинами"), 0);
+        assert_eq!(
+            count_lexical_matches(&tokens, "* Left side: шоколадки на касах"),
+            2
+        );
+
+        let tokens = extract_stemmed_terms("важко вранці відкрити очі");
+        assert_eq!(count_lexical_matches(&tokens, "Я ВНОЧІ: 02:00"), 0);
+    }
+}
