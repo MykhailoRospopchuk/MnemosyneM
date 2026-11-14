@@ -1,21 +1,21 @@
-# 💡 MnemosyneM — Банк Ідей та Майбутніх Фіч (Feature Ideas)
+# 💡 MnemosyneM — Feature Ideas & Backlog
 
-Цей документ містить скарбничку ідей, концепцій та майбутніх розширень для проєкту **MnemosyneM**. Вони розділені за пріоритетами, складністю та впливом на залучення користувачів (Retention & Virality).
+This document captures ideas, product concepts, and future extensions for **MnemosyneM**, organized by priority, implementation complexity, and user engagement impact (Retention & Virality).
 
 ---
 
-## 🏆 Топ-пріоритетні фічі (Найближчий фокус)
+## 🏆 Top-Priority Features (Near-Term Focus)
 
-### 1. 🎲 Рандомайзер мемів / «Дофамінова підписка» (Meme Drip Delivery)
-* **Концепція:** Користувач налаштовує підписку: наприклад, надсилати йому випадкові меми протягом $N$ днів у кількості $K$ штук на добу у **непередбачуваний випадковий час**.
-* **Чому це круто:** 
-  * Звичайні таймери (кожні 30 хв) сприймаються як спам. Випадковий мем серед дня сприймається як дофаміновий сюрприз або несподіване повідомлення від друга.
-* **Ключові деталі UX:**
-  * **«Години тиші» (Quiet Hours):** Заборона відправки вночі (за замовчуванням 23:00 – 09:00).
-  * **Алгоритм Jitter/Poisson:** Наступний час генерується як $\text{now} + \text{random}(\text{min}, \text{max})$. Якщо випадає на ніч — переноситься на ранок.
-  * **Трекінг історії:** Зберігати історію відправлених мемів у `user_delivered_memes`, щоб не надсилати один мем двічі.
-* **Архітектура в Rust:**
-  * Таблиця в SQLite:
+### 1. 🎲 Meme Randomizer / "Dopamine Subscription" (Meme Drip Delivery)
+* **Concept:** The user configures a subscription to receive random memes over $N$ days at a rate of $K$ memes per day at **unpredictable random times**.
+* **Why it works:**
+  * Fixed-interval timers (every 30 min) feel like spam. A random meme popping up mid-day feels like a dopamine surprise or an unexpected text from a friend.
+* **Key UX details:**
+  * **Quiet Hours:** Suppress delivery overnight (default 23:00 – 09:00).
+  * **Jitter/Poisson scheduling:** Next delivery timestamp generated as $\text{now} + \text{random}(\text{min}, \text{max})$; if it falls inside quiet hours, shift to morning.
+  * **Delivery history tracking:** Persist sent memes in `user_delivered_memes` so the same user never receives duplicates.
+* **Rust Architecture:**
+  * SQLite schema:
     ```sql
     CREATE TABLE meme_subscriptions (
         user_id BIGINT PRIMARY KEY,
@@ -31,33 +31,33 @@
         PRIMARY KEY (user_id, meme_id)
     );
     ```
-  * Фоновий таск `tokio::spawn`, що раз на 1–2 хв опитує `meme_subscriptions` і робить `bot.send_photo`.
+  * Background `tokio::spawn` loop polling `meme_subscriptions` every 1–2 minutes and calling `bot.send_photo`.
 
-### 2. 🔥 Нативний Telegram Meme Tinder (`/tinder`) — Свайпалка на Inline-кнопках
-* **Чому це винесено з Mini App у нативний бот:**
-  * Міні-апка (TMA) — це громіздка фронтенд-задача (веб-стек, хостинг, JS-фреймворки), яка відволікає від фокусу на Rust-бекенді.
-  * Реалізація прямо в Telegram-чаті через фото-повідомлення та Inline-кнопки на 100% закриває потребу у швидкій оцінці контенту без оверхеду.
-* **UI/UX та розкладка кнопок:**
-  * Команда: `/tinder` (або кнопка в головному меню).
-  * Бот надсилає фото мему з трьома кнопками в **один спільний рядок**:
-    * **Ширші рівнорозмірні кнопки по краях:** `[ ❤️ Лайк ]` (зліва) та `[ ⏭️ Скіп ]` (справа).
-    * **Компактна менша кнопка по центру:** `[ 👎 ]` (дизлайк) — лаконічна іконка без довгого тексту, займає мінімум ширини між основними діями:
+### 2. 🔥 Native Telegram Meme Tinder (`/tinder`) — Inline-Button Swiper
+* **Why moved out of Mini App into the native bot:**
+  * Building a Telegram Mini App (TMA) brings heavy frontend overhead (web stack, hosting, JS frameworks) that distracts from core Rust backend development.
+  * Implementing it directly inside Telegram chat using photo messages and Inline buttons satisfies 100% of the quick-rating workflow with zero extra stack.
+* **UI/UX & Button Layout:**
+  * Command: `/tinder` (or main menu button).
+  * The bot sends a meme photo with three inline buttons arranged in **a single row**:
+    * **Wider equal-width primary buttons on the sides:** `[ ❤️ Like ]` (left) and `[ ⏭️ Skip ]` (right).
+    * **Compact smaller button in the center:** `[ 👎 ]` (dislike) — icon-only to occupy minimal width between the primary actions:
       ```text
       +-------------------+-------+-------------------+
-      |     ❤️ Лайк       |  👎   |      ⏭️ Скіп      |
+      |     ❤️ Like       |  👎   |      ⏭️ Skip      |
       +-------------------+-------+-------------------+
       ```
-* **Тривимірна система реакцій:**
-  * 👍 **Лайк:** Мем потрапляє в окрему категорію **«❤️ Вподобані» (Likes Feed / `/liked`)**.
-    * *Ключовий UX-принцип:* Лайк **НЕ форсить** додавання мему у власну робочу колекцію (`user_memes`), щоб не засмічувати персональний каталог пошуку сотнями мемів, які просто сподобались.
-  * ⏭️ **Скіп:** Нейтральний пропуск мему без оцінки (показується наступний).
-  * 👎 **Дизлайк:** Мем більше ніколи не показується цьому користувачу та знижує глобальний рейтинг мему.
-* **Чітке розділення «Моя колекція» vs «Вподобайки»:**
-  * **«Моя колекція» (`user_memes`):** Меми, збережені для швидкого виклику/пошуку через `@bot`. Вони можуть бути суто утилітарними/робочими і не обов'язково мати лайк.
-  * **«Вподобані» (`user_reactions WHERE reaction = 'like'`):** Окремий розділ улюбленого контенту. Прямо звідти за бажанням можна натиснути `[ 📥 Зберегти в мої меми ]`, якщо мем потрібен і в особистому пошуку.
-* **Безшовне оновлення (Zero Chat Spam):**
-  * При натисканні будь-якої кнопки бот редагує поточне повідомлення через `edit_message_media`, миттєво підставляючи нове фото з оновленим `meme_id` у callback data. Жодного спаму в чаті!
-* **Архітектура в БД:**
+* **Three-Way Reaction System:**
+  * 👍 **Like:** Adds the meme to a separate **Likes Feed (`❤️ Liked` / `/liked`)**.
+    * *Core UX rule:* Liking a meme **MUST NOT force-add** it into the user's personal working collection (`user_memes`), keeping personal inline search clean instead of polluting it with hundreds of merely liked memes.
+  * ⏭️ **Skip:** Neutral skip without rating (advances to next meme).
+  * 👎 **Dislike:** Hides the meme permanently from that user and lowers the meme's global ranking.
+* **Strict Separation: "My Collection" vs "Liked":**
+  * **"My Collection" (`user_memes`):** Memes explicitly saved for fast lookup/search via `@bot`. These can be purely utilitarian/work memes that don't necessarily carry a "like".
+  * **"Liked" (`user_reactions WHERE reaction = 'like'`):** A dedicated favorites feed. From there, a user can optionally tap `[ 📥 Save to My Memes ]` if they also want it in personal search.
+* **Seamless Updates (Zero Chat Spam):**
+  * Tapping any reaction button edits the existing message in place via `edit_message_media`, swapping in the next photo and updated `meme_id` callback data. Zero chat clutter.
+* **Database Schema:**
   ```sql
   CREATE TABLE IF NOT EXISTS user_reactions (
       user_id BIGINT NOT NULL,
@@ -72,60 +72,60 @@
 
 ---
 
-### 3. 🕷️ Автономний збирач мемів з публічних каналів (Channel Crawler)
-* **Концепція:** Бот самостійно раз на кілька годин моніторить список відкритих Telegram-каналів і поповнює загальну публічну базу новими мемами без участі адміна каналу.
-* **Механізм (Web Scraper `t.me/s/`):**
-  * Telegram надає веб-дзеркало для публічних каналів: `https://t.me/s/<channel_username>`.
-  * Фоновий сервіс на Rust (`reqwest` + `scraper`) читає сторінку каналу, витягує нові пости, завантажує фотографії.
-  * Нові картинки автоматично відправляються в нашу чергу `QueueWorker`.
-  * Автоматично заповнюються поля джерела: `source_title: "@назва_каналу"`, `source_url: "https://t.me/..."`.
-* **Переваги:** Не потрібні окремі юзерботи чи адмін-права в каналах; база автоматично наповнюється свіжими мемами.
+### 3. 🕷️ Autonomous Public Channel Crawler (Channel Crawler)
+* **Concept:** Periodically monitors a curated list of public Telegram channels every few hours and enriches the public meme catalog automatically without requiring channel admin rights.
+* **Mechanism (`t.me/s/` Web Mirror):**
+  * Telegram exposes public channel feeds at `https://t.me/s/<channel_username>`.
+  * A background Rust worker (`reqwest` + `scraper`) parses recent posts and downloads new images.
+  * Fresh media enters the existing `QueueWorker` ingestion pipeline.
+  * Provenance fields are populated automatically: `source_title: "@channel_name"`, `source_url: "https://t.me/..."`.
+* **Benefits:** No userbots or admin permissions needed; the database stays continuously fresh.
 
 ---
 
-## 👥 Соціалка та вірусний ріст (Virality & Growth)
+## 👥 Social Features & Virality (Virality & Growth)
 
-### 3. 🎭 «Мем на це» / Реакція в групових чатах (Group Reaction Mode)
-* **Концепція:** Бота додають у груповий чат (робочий чи дружній). Користувач відповідає на будь-яке повідомлення співрозмовника командою `@mnemosyne_bot мем` або реплаєм із тригером.
-* **Під капотом:** Бот бере текст цитованого повідомлення, робить векторний пошук найбільш саркастичного / релевантного мему і кидає його у чат відповіддю.
-* **Ефект:** 1 користувач приводить у бота весь чат на 20–50 людей.
+### 3. 🎭 "Meme for That" / Group Chat Reaction Mode
+* **Concept:** The bot is added to a group chat (work or friends). Users reply to any message with `@mnemosyne_bot meme` or a trigger reply.
+* **Under the hood:** The bot extracts the quoted message text, runs semantic search for the sharpest / most relevant reaction meme, and replies directly in thread.
+* **Impact:** One active user introduces the bot to an entire 20–50 person group chat.
 
-### 4. 📦 Експорт персонального стікерпаку (`/make_stickers`)
-* **Концепція:** Користувач тисне команду в боті, і бот генерує офіційний Telegram-стікерпак з улюблених збережених мемів цього користувача (`user_memes`).
-* **Під капотом:** Використання Telegram Bot API методів `createNewStickerSet` / `addStickerToSet`.
-* **Ефект:** Користувач може надсилати свої улюблені меми в будь-які чати як нативні стікери.
+### 4. 📦 Personal Sticker Pack Export (`/make_stickers`)
+* **Concept:** On command, the bot builds an official Telegram sticker pack generated from the user's saved collection (`user_memes`).
+* **Under the hood:** Uses Telegram Bot API `createNewStickerSet` / `addStickerToSet`.
+* **Impact:** Users can send their saved memes in any chat as native stickers.
 
 ---
 
-## 🧠 ШІ-фічі та покращений пошук (Smart Search & VLM)
+## 🧠 AI Features & Smart Search (Smart Search & VLM)
 
-### 5. 📸 Пошук за емоцією / селфі (Vibe & Mood Search)
-* **Концепція:** Користувач надсилає боту своє фото/селфі або картинку емоції без тексту.
-* **Під капотом:** VLM описує настрій та емоційний стан сцени (наприклад: *"втомлена людина в понеділок зранку за ноутбуком"*). Текст ембедиться і шукається мем з ідентичним вайбом.
+### 5. 📸 Vibe & Mood Search (Reaction by Selfie / Image)
+* **Concept:** User sends a selfie or textless reaction photo to the bot.
+* **Under the hood:** VLM describes the emotion and scene mood (e.g., *"exhausted person staring at laptop on Monday morning"*), embeds that text, and retrieves memes with matching vibes.
 
-### 6. 🧩 Сімейства та шаблони мемів (Meme Template Clustering)
-* **Концепція:** Зв'язування мемів, що побудовані на одному шаблоні (наприклад, *"Невірний хлопець"*, *"Дрейк"*, *"Мавпа, що думає"*).
-* **Юзер-досвід:** Кнопка під мемом: *«🔍 Ще 6 варіантів цього шаблону»*.
-* **Під капотом:** Використання поля `template_name`, яке повертає VLM, або обчислення візуальної близькості.
+### 6. 🧩 Meme Template Families & Clustering
+* **Concept:** Links variants built on the same meme format (e.g., *"Distracted Boyfriend"*, *"Drake"*, *"Thinking Monkey"*).
+* **UX:** Button under a meme: *"🔍 6 more variants of this template"*.
+* **Under the hood:** Clusters by a VLM-extracted `template_name` field or visual similarity metrics.
 
-### 7. 🏷️ Автоматичні тематичні теги та каталог категорій (`#робота`, `#стосунки`, `#айті`)
-* **Концепція:** VLM під час індексації автоматично генерує 2–4 релевантні нормалізовані теги/категорії для кожного мему.
-* **Юзер-досвід:**
-  * **Команда `/tags` (Каталог категорій з лічильниками):** Юзер може викликати `/tags` і отримати список усіх доступних у базі тегів з кількістю мемів по кожному:
+### 7. 🏷️ Auto-Generated Topic Tags & Category Browser (`#work`, `#relationships`, `#it`)
+* **Concept:** During VLM indexing, automatically extract 2–4 normalized topical tags/categories per meme.
+* **UX:**
+  * **`/tags` command (Tag Directory with Counts):** Displays every tag in the catalog alongside meme counts:
     ```text
-    🏷️ Каталог тегів та категорій:
-    • #робота (42)
-    • #айті (38)
-    • #стосунки (25)
-    • #коти (19)
-    • #дедлайн (14)
-    • #жиза (12)
+    🏷️ Tags & Categories Directory:
+    • #work (42)
+    • #it (38)
+    • #relationships (25)
+    • #cats (19)
+    • #deadline (14)
+    • #relatable (12)
     ```
-  * **One-Tap перехід в інлайн:** Під списком виводяться інтерактивні Inline-кнопки (`SwitchInlineQueryCurrentChat`), які в один клік відкривають пошук за вибраним тегом.
-  * **Гнучка фільтрація в пошуку:** Підтримка комбінованого інлайн-пошуку: `@mnemosyne_bot #робота дедлайн` або навігація по своїх збережених мемах за категоріями.
-* **Під капотом:**
-  * Таблиці `tags (id, name UNIQUE)` та реляційна зв'язка `meme_tags (meme_id, tag_id)`.
-  * Швидкий агрегаційний SQL-запит для списку:
+  * **One-Tap Inline Launch:** Inline buttons (`SwitchInlineQueryCurrentChat`) beneath the directory launch instant search pre-filled with the selected tag.
+  * **Composable Search Filters:** Support combined inline queries like `@mnemosyne_bot #work deadline` or filtering personal saved memes by category.
+* **Under the hood:**
+  * Relational tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
+  * Fast aggregation query:
     ```sql
     SELECT t.name, COUNT(mt.meme_id) AS total_memes
     FROM tags t
@@ -134,42 +134,42 @@
     ORDER BY total_memes DESC;
     ```
 
-### 8. 🎬 Семантичний пошук та індексація GIF / MP4 анімацій *(✅ Реалізовано у v0.2)*
-* **Концепція:** Повноцінна підтримка анімованих мемів (гіфок) на рівні з фото-мемами.
-* **Чому це критично круто:**
-  * Звичайні боти та пошуковики (Tenor, Giphy) шукають гіфки лише за примітивними ручними тегами або назвами файлів.
-  * MnemosyneM індексує **динаміку сцени**: Gemini VLM нативно розуміє MP4-відео, розпізнає дії персонажів у часі, зміну емоцій та текст/субтитри, що з'являються на різних секундах.
-* **Архітектурні особливості (Zero-Cost & Pure Rust):**
-  * **Telegram Animation Object:** Telegram зберігає гіфки як H.264 MP4 без звуку. Ми завантажуємо цей файл і передаємо напряму в Gemini API (`inline_data` з `mime_type: "video/mp4"`).
-  * **Без важкого FFmpeg:** Жодних громіздких C-залежностей на сервері — всю важку роботу з відео робить хмара Gemini та Telegram.
-  * **Миттєвий pHash:** Перцептивний хеш рахується зі статичного JPEG-кадру `animation.thumbnail`, який Telegram надає безкоштовно.
-  * **Миттєва відправка:** В інлайн-пошуку гіфки видаються через `InlineQueryResultCachedMpeg4Gif` за кешованим `file_id` (0 байт трафіку сервера, 0 дискового простору).
+### 8. 🎬 Semantic Search & Indexing for GIF / MP4 Animations *(✅ Shipped in v0.2)*
+* **Concept:** First-class support for animated memes (GIFs) on par with static image memes.
+* **Why it matters:**
+  * Standard search engines (Tenor, Giphy) rely on crude manual filename tags.
+  * MnemosyneM indexes **scene dynamics**: Gemini VLM natively processes MP4 video frames, recognizing character actions over time, emotional shifts, and subtitles appearing mid-clip.
+* **Architectural highlights (Zero-Cost & Pure Rust):**
+  * **Telegram Animation Object:** Telegram stores GIFs as silent H.264 MP4s. We download the clip and send it directly to Gemini (`inline_data` with `mime_type: "video/mp4"`).
+  * **No heavy FFmpeg dependency:** Zero C/video library bloat on the server—Telegram and Gemini handle decoding.
+  * **Instant pHash:** Perceptual hash is computed directly from the static JPEG `animation.thumbnail` Telegram provides for free.
+  * **Zero-bandwidth Inline Delivery:** Results return `InlineQueryResultCachedMpeg4Gif` using cached Telegram `file_id`s (0 bytes server egress, 0 local media storage).
 
 ---
 
-### 9. 🧹 Перцептивний детектор дублікатів (Visual Hashes - pHash) *(✅ Реалізовано у v0.2)*
-* **Концепція:** Виявлення однакових зображень, навіть якщо вони мають різну роздільну здатність, стиснення чи легкий кроп.
-* **Під капотом:** Rust-бібліотека `image_hasher` (64-бітний градієнтний хеш). Запобігає дублюванню мемів, обчислює відстань Геммінга (`POPCNT`) за мікросекунди і повністю скіпає виклики до Gemini VLM. Для старих мемів працює автономний фоновий воркер `src/maintenance/maintance_worker.rs`.
+### 9. 🧹 Perceptual Duplicate Detector (Visual Hashes - pHash) *(✅ Shipped in v0.2)*
+* **Concept:** Detects identical memes even across recompression, resolution changes, or minor crops.
+* **Under the hood:** Uses `image_hasher` (64-bit gradient hash) in Rust, computing Hamming distance (`POPCNT`) in microseconds and skipping redundant Gemini VLM calls. Backfills legacy rows via autonomous worker [`src/maintenance/maintance_worker.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/maintenance/maintance_worker.rs).
 
 ---
 
-## 🎨 Генерація та інтерактив (Meme Studio)
+## 🎨 Generation & Interactive Features (Meme Studio)
 
-### 10. ✏️ Генератор мемів на льоту (Meme Remix / Meme Canvas)
-* **Концепція:** Створення нового мему прямо в чаті бота за шаблоном.
-* **Команда:** `/remix шаблон | верхній текст | нижній текст`.
-* **Під капотом:** Чистий рендеринг у Rust (`imageproc` + `ab_glyph`). Накладання класичного білого шрифту Impact з чорним контуром за мілісекунди без сторонніх платних API.
+### 10. ✏️ On-the-Fly Meme Generator (Meme Remix / Meme Canvas)
+* **Concept:** Create custom captioned memes directly inside bot chat from existing templates.
+* **Command:** `/remix template | top text | bottom text`.
+* **Under the hood:** Pure Rust rendering (`imageproc` + `ab_glyph`) overlaying classic white Impact font with black outline in milliseconds without paid external APIs.
 
-### 11. 🎯 Мемна вікторина (Daily Meme Quiz / Trivia)
-* **Концепція:** Щоденний квіз у боті або в каналах: картинка з замальованим текстом і опитування з 4 варіантами панчлайну.
-* **Ефект:** Висока залученість та щоденне відкриття бота.
+### 11. 🎯 Daily Meme Quiz / Trivia
+* **Concept:** Daily game in private chat or channels: a meme with its punchline blurred out and a 4-option poll to guess the caption.
+* **Impact:** High retention and daily habit formation.
 
 ---
 
-## 📱 Візуальний інтерфейс (Future Phase)
+## 📱 Visual Web Interface (Future Phase)
 
 ### 12. 🖼️ Telegram Mini App (TMA): Masonry Grid Pinterest (Future Phase)
-* **Концепція:** Повноцінний веб-інтерфейс, який відкривається по кнопці всередині Telegram, якщо в майбутньому виникне потреба у візуальному вебі.
-  * **Masonry Grid (Pinterest):** Зручний перегляд тисяч мемів сіткою, нескінченний скрол та візуальна галерея.
-  * **Панель керування підпискою:** Візуальні слайдери для налаштування «Дофамінової підписки» та годин тиші.
-  * *(Примітка: Свайпалку Meme Tinder перенесено в нативний інтерфейс бота — п. 2, оскільки створення TMA вимагає великого окремого веб-стека).*
+* **Concept:** A full web interface launched inside Telegram if rich visual browsing becomes worthwhile later.
+  * **Masonry Grid (Pinterest):** Infinite-scroll gallery view across thousands of memes.
+  * **Subscription Controls:** Visual sliders to configure "Dopamine Subscription" cadence and quiet hours.
+  * *(Note: Meme Tinder swiping was moved to the native bot UI—see item 2—because building a TMA requires maintaining a separate web stack).*
