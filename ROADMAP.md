@@ -538,9 +538,9 @@ Meme ID: 1793041234
   - [x] Multi-Model VLM Fallback Pool (`GEMINNI_MODEL_POOL`): automated failover across `3.5-flash-lite`, `3.1-flash-lite`, `3.5-flash`, `3.6-flash`, `3.8-flash` on 503/429 spikes.
   - [x] Progressive backoff and retry queue (5s, 10s) on transient VLM errors with sender requeue.
   - [x] Markdown code fence cleanup (`clean_json`) and Serde field aliases in VLM response parser.
-  - [ ] Worker image download retry loop with backoff on Telegram network resets.
-  - [ ] Multi-shape VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, and flexible booleans (`"false"`, `0`).
-  - [ ] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
+  - [x] Worker image download retry loop with backoff on Telegram network resets.
+  - [x] Multi-shape VLM response parser: handle array-wrapped JSON (`[ { ... } ]`), nested wrapper objects, and flexible booleans (`"false"`, `0`).
+  - [x] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
   - [x] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
   - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).

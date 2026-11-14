@@ -17,7 +17,7 @@ const GEMINNI_MODEL_POOL: &[&str] = &[
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemeAnalysis {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_flexible_bool")]
     pub is_nsfw: bool,
     #[serde(alias = "text", alias = "extracted_text", default)]
     pub ocr_text: String,
@@ -30,6 +30,29 @@ pub struct MemeAnalysis {
         default
     )]
     pub en_description: String,
+}
+
+fn deserialize_flexible_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Bool(b) => Ok(b),
+        serde_json::Value::Number(n) => Ok(n.as_i64().unwrap_or(0) != 0),
+        serde_json::Value::String(s) => match s.trim().to_lowercase().as_str() {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" | "" => Ok(false),
+            other => Err(serde::de::Error::custom(format!(
+                "Invalid boolean string: {}",
+                other
+            ))),
+        },
+        serde_json::Value::Null => Ok(false),
+        other => Err(serde::de::Error::custom(format!(
+            "Expected bool, number, or string, got: {}",
+            other
+        ))),
+    }
 }
 
 pub async fn describe_meme(
@@ -165,18 +188,7 @@ pub async fn describe_meme(
             .as_str()
             .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
-        let trimmed = raw_text.trim();
-        let without_prefix = trimmed
-            .strip_prefix("```json")
-            .or_else(|| trimmed.strip_prefix("```"))
-            .unwrap_or(trimmed);
-        let clean_json = without_prefix
-            .strip_suffix("```")
-            .unwrap_or(without_prefix)
-            .trim();
-        let analysis: MemeAnalysis = serde_json::from_str(clean_json).map_err(|e| {
-            VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text))
-        })?;
+        let analysis = parse_meme_analysis(raw_text)?;
         if analysis.is_nsfw {
             println!(
                 "[VLM BLOCKED] Explicit/NSFW content detected in description! Gemini response: {}",
@@ -194,4 +206,151 @@ pub async fn describe_meme(
         "All VLM models failed. Last error: {}",
         last_error
     )))
+}
+
+fn unwrap_vlm_value(value: serde_json::Value) -> Result<serde_json::Value, String> {
+    match value {
+        serde_json::Value::Array(mut arr) => {
+            if arr.is_empty() {
+                return Err("Empty JSON array from VLM".to_string());
+            }
+            unwrap_vlm_value(arr.remove(0))
+        }
+        serde_json::Value::Object(map) => {
+            const KNOWN_KEYS: &[&str] = &[
+                "is_nsfw",
+                "ocr_text",
+                "text",
+                "extracted_text",
+                "uk_description",
+                "description_ukrainian",
+                "uk",
+                "en_description",
+                "description_english",
+                "description_en",
+                "en",
+            ];
+            if KNOWN_KEYS.iter().any(|k| map.contains_key(*k)) {
+                return Ok(serde_json::Value::Object(map));
+            }
+
+            if map.len() == 1
+                && map
+                    .values()
+                    .next()
+                    .is_some_and(|v| v.is_object() || v.is_array())
+            {
+                let (_, inner) = map.into_iter().next().unwrap();
+                return unwrap_vlm_value(inner);
+            }
+
+            Ok(serde_json::Value::Object(map))
+        }
+        other => Err(format!("Unexpected JSON shape from VLM: {}", other)),
+    }
+}
+
+fn strip_markdown_fences(raw_text: &str) -> &str {
+    let trimmed = raw_text.trim();
+    let without_prefix = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    without_prefix
+        .strip_suffix("```")
+        .unwrap_or(without_prefix)
+        .trim()
+}
+
+fn extract_json_slice(text: &str) -> &str {
+    let obj_start = text.find('{');
+    let arr_start = text.find('[');
+
+    match (obj_start, arr_start) {
+        (Some(o), Some(a)) if a < o => {
+            if let Some(end) = text.rfind(']')
+                && end >= a
+            {
+                return &text[a..=end];
+            }
+        }
+        (Some(o), _) => {
+            if let Some(end) = text.rfind('}')
+                && end >= o
+            {
+                return &text[o..=end];
+            }
+        }
+        (None, Some(a)) => {
+            if let Some(end) = text.rfind(']')
+                && end >= a
+            {
+                return &text[a..=end];
+            }
+        }
+        (None, None) => {}
+    }
+
+    text
+}
+
+pub fn parse_meme_analysis(raw_text: &str) -> Result<MemeAnalysis, VlmError> {
+    let cleaned = strip_markdown_fences(raw_text);
+    let json_slice = extract_json_slice(cleaned);
+
+    let value: serde_json::Value = serde_json::from_str(json_slice)
+        .map_err(|e| VlmError::Transient(format!("JSON parse error: {} | Raw: {}", e, raw_text)))?;
+
+    let unwrapped = unwrap_vlm_value(value).map_err(|e| {
+        VlmError::Transient(format!("JSON unwrap error: {} | Raw: {}", e, raw_text))
+    })?;
+
+    serde_json::from_value(unwrapped)
+        .map_err(|e| VlmError::Transient(format!("JSON decode error: {} | Raw: {}", e, raw_text)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_standard_fenced_object() {
+        let raw = r#"```json
+        {
+            "is_nsfw": false,
+            "ocr_text": "hello",
+            "uk_description": "привіт",
+            "en_description": "hello meme"
+        }
+        ```"#;
+
+        let parsed = parse_meme_analysis(raw).unwrap();
+        assert!(!parsed.is_nsfw);
+        assert_eq!(parsed.ocr_text, "hello");
+        assert_eq!(parsed.uk_description, "привіт");
+        assert_eq!(parsed.en_description, "hello meme");
+    }
+
+    #[test]
+    fn parses_array_wrapped_and_nested_wrapper() {
+        let raw = r#"Sure, here is the analysis:
+        [{"result": {"text": "test", "uk": "тест", "en": "test en", "is_nsfw": "false"}}]"#;
+
+        let parsed = parse_meme_analysis(raw).unwrap();
+        assert!(!parsed.is_nsfw);
+        assert_eq!(parsed.ocr_text, "test");
+        assert_eq!(parsed.uk_description, "тест");
+        assert_eq!(parsed.en_description, "test en");
+    }
+
+    #[test]
+    fn parses_numeric_and_string_booleans() {
+        let raw_zero = r#"{"is_nsfw": 0, "ocr_text": "a"}"#;
+        let raw_one = r#"{"is_nsfw": 1, "ocr_text": "b"}"#;
+        let raw_str_true = r#"{"is_nsfw": "TRUE", "ocr_text": "c"}"#;
+
+        assert!(!parse_meme_analysis(raw_zero).unwrap().is_nsfw);
+        assert!(parse_meme_analysis(raw_one).unwrap().is_nsfw);
+        assert!(parse_meme_analysis(raw_str_true).unwrap().is_nsfw);
+    }
 }

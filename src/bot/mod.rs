@@ -6,6 +6,7 @@ use crate::config::AppConfig;
 use crate::database::enums::command_enum::Command;
 use crate::worker::MemeJob;
 use std::sync::Arc;
+use std::time::Duration;
 use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::Message;
@@ -13,16 +14,39 @@ use teloxide::types::User;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc::Sender;
 
+async fn register_commands_with_retry(bot: &Bot, max_attempts: u32) {
+    for attempt in 1..=max_attempts {
+        match bot.set_my_commands(Command::bot_commands()).await {
+            Ok(_) => {
+                println!("[BOT] Commands registered successfully.");
+                return;
+            }
+            Err(e) => {
+                eprintln!(
+                    "[BOT]-[WARN] set_my_commands failed (attempt {}/{}): {}",
+                    attempt, max_attempts, e
+                );
+                if attempt < max_attempts {
+                    let delay_secs = 2 * attempt as u64;
+                    tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+                }
+            }
+        }
+    }
+
+    eprintln!(
+        "[BOT]-[WARN] Could not register commands after {} attempts; continuing startup anyway.",
+        max_attempts
+    );
+}
+
 pub async fn run_bot(
     bot: Bot,
     state: Arc<AppState>,
     app_config: &'static AppConfig,
     sender: Sender<MemeJob>,
 ) {
-    let _ = bot
-        .set_my_commands(Command::bot_commands())
-        .await
-        .expect("Cannot set commands");
+    register_commands_with_retry(&bot, 3).await;
 
     let handler = dptree::entry()
         .branch(Update::filter_message().endpoint(message_handler))
