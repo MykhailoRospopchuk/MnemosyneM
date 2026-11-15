@@ -574,8 +574,8 @@ Meme ID: 1793041234
   - [ ] **🔥 Search Quality & Hybrid Retrieval Overhaul (TOP PRIORITY — see `docs/search-research/`):**
     - [ ] **Phase 0 (Quick Wins):**
       - [x] Fix `ocr_text` boost in `find_top_k`: use `w.chars().count() >= 3` instead of UTF-8 byte `.len()`, add UA/EN stopwords list, and match whole normalized tokens / light prefix stems instead of raw `.contains()`.
-      - [ ] Search-time `phash` deduplication in `find_top_k` (`MAX_PHASH_DISTANCE`) so clone memes never occupy multiple `TOP_K` slots.
-      - [ ] Replace `best_score > 0.05` with relative score-gap cutoff from Top-1 (`gap_cutoff`) + weak-result guard.
+      - [x] Search-time `phash` deduplication in `find_top_k` (`MAX_PHASH_DISTANCE`) so clone memes never occupy multiple `TOP_K` slots.
+      - [x] Replace `best_score > 0.05` with relative score-gap cutoff from Top-1 (`gap_cutoff`) + weak-result guard.
       - [ ] Refactor VLM prompt in `src/vlm.rs`: forbid Markdown layout tags (`*Top text:*`) and prose boilerplate; enforce concise scene + joke meaning + Ukrainian keywords.
     - [ ] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
       - [ ] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title`, kept in sync on inserts/updates.

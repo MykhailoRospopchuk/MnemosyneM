@@ -695,10 +695,11 @@ fn find_top_k<'a>(
     scope_visible: String,
     media_filter: Option<MediaType>,
 ) -> Vec<(&'a Meme, f32)> {
-    let mut selected_memes: Vec<(&'a Meme, f32)> = Vec::with_capacity(memes.len());
+    let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(memes.len());
 
     let query_terms = extract_stemmed_terms(query_text);
     for meme in memes {
+        let mut has_lexical_match = false;
         if !meme.is_visible_to(user_id, &scope_visible) {
             continue;
         };
@@ -718,42 +719,55 @@ fn find_top_k<'a>(
             if matches > 0 {
                 let boost = 0.04 * (matches as f32 / query_terms.len() as f32);
                 best_score = (best_score + boost).min(1.0);
+                has_lexical_match = true;
             }
         }
-        if best_score > 0.05 {
-            selected_memes.push((meme, best_score));
+        if best_score > 0.5 {
+            selected_memes.push(ScoredMeme {
+                meme,
+                score: best_score,
+                has_lexical_match,
+            });
         }
     }
-    selected_memes.sort_by(|b, a| a.1.total_cmp(&b.1));
-    deduplicate_by_phash(
-        selected_memes,
+    selected_memes.sort_by(|b, a| a.score.total_cmp(&b.score));
+
+    let weak_filtered = weak_results(selected_memes);
+
+    let deduplicated = deduplicate_by_phash(
+        weak_filtered,
         app_config.top_k,
         app_config.max_phash_distance,
-    )
+    );
+
+    select_relative(deduplicated)
+        .into_iter()
+        .map(|f| (f.meme, f.score))
+        .collect()
 }
 
 fn deduplicate_by_phash<'a>(
-    sorted_memes: Vec<(&'a Meme, f32)>,
+    sorted_memes: Vec<ScoredMeme<'a>>,
     limit: usize,
     max_distance: u32,
-) -> Vec<(&'a Meme, f32)> {
-    let mut selected_memes: Vec<(&'a Meme, f32)> = Vec::with_capacity(limit);
+) -> Vec<ScoredMeme<'a>> {
+    let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(limit);
     let mut seen_phash: Vec<u64> = Vec::with_capacity(limit);
 
-    for (meme, score) in sorted_memes {
-        if meme.phash != 0
+    for scored_meme in sorted_memes {
+        if scored_meme.meme.phash != 0
             && seen_phash
                 .iter()
-                .any(|&h| hamming_distance(h, meme.phash) <= max_distance)
+                .any(|&h| hamming_distance(h, scored_meme.meme.phash) <= max_distance)
         {
             continue;
         }
 
-        if meme.phash != 0 {
-            seen_phash.push(meme.phash);
+        if scored_meme.meme.phash != 0 {
+            seen_phash.push(scored_meme.meme.phash);
         }
 
-        selected_memes.push((meme, score));
+        selected_memes.push(scored_meme);
 
         if selected_memes.len() == limit {
             break;
@@ -761,6 +775,53 @@ fn deduplicate_by_phash<'a>(
     }
 
     selected_memes
+}
+
+fn select_relative<'a>(candidates: Vec<ScoredMeme<'a>>) -> Vec<ScoredMeme<'a>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::new();
+    let top1_score = candidates[0].score;
+    selected_memes.push(candidates[0].clone());
+
+    for item in candidates.iter().skip(1) {
+        if item.has_lexical_match || top1_score - item.score <= 0.032 {
+            selected_memes.push(item.clone());
+        }
+    }
+
+    selected_memes
+}
+
+fn weak_results<'a>(candidates: Vec<ScoredMeme<'a>>) -> Vec<ScoredMeme<'a>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    if candidates.len() >= 20 {
+        let mut top_three = false;
+        if let Some(chunk) = candidates.first_chunk::<3>() {
+            top_three = chunk.iter().any(|f| f.has_lexical_match)
+        }
+
+        if !top_three
+            && candidates[0].score < 0.82
+            && candidates[0].score - candidates[19].score <= 0.02
+        {
+            return Vec::new();
+        }
+    }
+
+    candidates
+}
+
+#[derive(Clone, Debug)]
+struct ScoredMeme<'a> {
+    meme: &'a Meme,
+    score: f32,
+    has_lexical_match: bool,
 }
 
 #[cfg(test)]
@@ -786,6 +847,14 @@ mod tests {
         }
     }
 
+    fn make_scored<'a>(meme: &'a Meme, score: f32, has_lexical_match: bool) -> ScoredMeme<'a> {
+        ScoredMeme {
+            meme,
+            score,
+            has_lexical_match,
+        }
+    }
+
     #[test]
     fn deduplicate_by_phash_skips_near_clones_and_keeps_top_score() {
         let m1 = make_test_meme(1, 0b1111_1111, "", vec![1.0, 0.0]);
@@ -793,9 +862,14 @@ mod tests {
         let m3 = make_test_meme(3, 0xFFFF_0000_0000_0000, "", vec![1.0, 0.0]);
         let m4 = make_test_meme(4, 0x0000_FFFF_0000_0000, "", vec![1.0, 0.0]);
 
-        let candidates = vec![(&m1, 0.90), (&m2, 0.88), (&m3, 0.85), (&m4, 0.82)];
+        let candidates = vec![
+            make_scored(&m1, 0.90, false),
+            make_scored(&m2, 0.88, false),
+            make_scored(&m3, 0.85, false),
+            make_scored(&m4, 0.82, false),
+        ];
         let selected = deduplicate_by_phash(candidates, 3, 5);
-        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+        let ids: Vec<u64> = selected.into_iter().map(|s| s.meme.id).collect();
 
         assert_eq!(ids, vec![1, 3, 4]);
     }
@@ -805,9 +879,9 @@ mod tests {
         let m1 = make_test_meme(10, 0, "", vec![1.0, 0.0]);
         let m2 = make_test_meme(20, 0, "", vec![1.0, 0.0]);
 
-        let candidates = vec![(&m1, 0.90), (&m2, 0.85)];
+        let candidates = vec![make_scored(&m1, 0.90, false), make_scored(&m2, 0.85, false)];
         let selected = deduplicate_by_phash(candidates, 3, 5);
-        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+        let ids: Vec<u64> = selected.into_iter().map(|s| s.meme.id).collect();
 
         assert_eq!(ids, vec![10, 20]);
     }
@@ -817,11 +891,51 @@ mod tests {
         let m1 = make_test_meme(1, 0b0000_0000, "", vec![1.0, 0.0]);
         let m2 = make_test_meme(2, 0b0011_1111, "", vec![1.0, 0.0]); // hamming = 6 > 5
 
-        let candidates = vec![(&m1, 0.90), (&m2, 0.85)];
+        let candidates = vec![make_scored(&m1, 0.90, false), make_scored(&m2, 0.85, false)];
         let selected = deduplicate_by_phash(candidates, 3, 5);
-        let ids: Vec<u64> = selected.into_iter().map(|(m, _)| m.id).collect();
+        let ids: Vec<u64> = selected.into_iter().map(|s| s.meme.id).collect();
 
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn select_relative_filters_tail_beyond_gap_unless_lexically_matched() {
+        let m1 = make_test_meme(1, 1, "", vec![1.0, 0.0]);
+        let m2 = make_test_meme(2, 2, "", vec![1.0, 0.0]);
+        let m3 = make_test_meme(3, 3, "", vec![1.0, 0.0]);
+        let m4 = make_test_meme(4, 4, "", vec![1.0, 0.0]);
+
+        let candidates = vec![
+            make_scored(&m1, 0.88, false),
+            make_scored(&m2, 0.86, false), // diff 0.02 <= 0.032 -> keep
+            make_scored(&m3, 0.82, false), // diff 0.06 > 0.032, no lex -> drop
+            make_scored(&m4, 0.82, true),  // diff 0.06 > 0.032, has lex -> keep
+        ];
+
+        let kept = select_relative(candidates);
+        let ids: Vec<u64> = kept.into_iter().map(|s| s.meme.id).collect();
+        assert_eq!(ids, vec![1, 2, 4]);
+    }
+
+    #[test]
+    fn weak_results_rejects_flat_weak_results_and_keeps_lex_confirmed() {
+        let memes: Vec<Meme> = (1..=20)
+            .map(|id| make_test_meme(id, id, "", vec![1.0, 0.0]))
+            .collect();
+
+        let flat_noise: Vec<ScoredMeme<'_>> = memes
+            .iter()
+            .enumerate()
+            .map(|(i, m)| make_scored(m, 0.81 - (i as f32) * 0.0005, false))
+            .collect();
+        assert!(weak_results(flat_noise).is_empty());
+
+        let with_lex: Vec<ScoredMeme<'_>> = memes
+            .iter()
+            .enumerate()
+            .map(|(i, m)| make_scored(m, 0.81 - (i as f32) * 0.0005, i == 0))
+            .collect();
+        assert_eq!(weak_results(with_lex).len(), 20);
     }
 
     #[test]
@@ -866,5 +980,34 @@ mod tests {
         assert!(
             (results[1].1 - cosine_similarity(&query_vec, &[0.88, 0.12]).unwrap()).abs() < 1e-5
         );
+    }
+
+    #[test]
+    fn find_top_k_drops_distant_unmatched_tail() {
+        let cfg = AppConfig {
+            db_path: String::new(),
+            top_k: 3,
+            gemini_api_key: String::new(),
+            max_phash_distance: 5,
+        };
+
+        let exact = make_test_meme(1, 0x1000, "шоколадки", vec![1.0, 0.0]);
+        let noise = make_test_meme(2, 0x2000, "випадковий текст", vec![0.8, 0.6]); // cos = 0.80, gap = 0.20 > 0.032
+
+        let memes = vec![exact, noise];
+        let query_vec = vec![1.0, 0.0];
+
+        let results = find_top_k(
+            &query_vec,
+            "шоколадки",
+            &memes,
+            &cfg,
+            1,
+            "all".to_string(),
+            None,
+        );
+
+        let ids: Vec<u64> = results.iter().map(|(m, _)| m.id).collect();
+        assert_eq!(ids, vec![1]);
     }
 }
