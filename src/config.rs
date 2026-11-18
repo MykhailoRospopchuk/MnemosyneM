@@ -9,6 +9,7 @@ pub struct AppConfig {
     pub top_k: usize,
     pub gemini_api_key: String,
     pub max_phash_distance: u32,
+    pub auto_reprocess: bool,
 }
 
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -41,5 +42,10 @@ pub fn load_config() -> &'static AppConfig {
             .ok()
             .and_then(|v| v.parse::<u32>().ok())
             .unwrap_or(MAX_PHASH_DISTANCE),
+
+        auto_reprocess: env::var("AUTO_REPROCESS")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true),
     })
 }

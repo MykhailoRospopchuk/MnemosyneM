@@ -50,7 +50,18 @@ Auditing `mnemosynem_v2.db` (**1,237 memes**) and running experiments on `Multil
 | **Current baseline** | Medium (harmed by OCR bug) | Low (`25% Hit@3`) | ❌ None (`> 0.05`) | — | — |
 | **Phase 0: Fix OCR + Stopwords + pHash dedup + Gap Cutoff + VLM Prompt** | High | Medium | Basic (gap + floor) | Very low (hours) | New memes only (optional backfill) |
 | **Phase 1A: Hybrid (E5 Vector + SQLite FTS5/BM25)** | High (`~100%`) | Needs calibration (avoid equal RRF!) | Medium | Low–Medium | No (FTS5 built from existing columns) |
-| **Phase 1B: Hybrid Top-20 + Cross-Encoder Rerank (`TextRerank`)** | Very High | High (token-to-token attention) | ✅ High (calibrated logits) | Medium (RAM + CPU latency) | Optional (clean VLM prompt helps) |
+| **Phase 1B: Hybrid Top-20 + Cross-Encoder Rerank (`TextRerank`)** | Very High | High (token-to-token attention) | ✅ High (calibrated logits) | Medium (1.1–2.2 GB RAM + CPU latency) | Optional (clean VLM prompt helps) |
+| **Phase 1B (Alt): Hybrid Top-15 + `gemini-decision-1` Cloud Judge** | Very High | High | ✅ High (`noul`/`score` 0.01–0.99) | Low (**0 GB extra RAM**, ~150–250 ms RTT, `10K RPD / 200 RPM`) | No (uses existing descriptions) |
 | **Phase 2: Multi-Vector (`holistic + scene + meaning`) + Rerank / `BGEM3Q`** | Maximum | High | ✅ High | High (schema migration) | Yes (VLM + embeddings) |
 | **Visual Embeddings (`CLIP` / `SigLIP`)** | Medium (misses meme captions) | Low for text-heavy memes | Low | High (`fastembed` CLIP is EN-only) | Yes |
 | **LLM Query Rewriting (Gemini per search)** | High | High | Medium | High (latency + RPM quota in inline) | No |
+
+---
+
+## ✅ Implementation Progress (Audited Nov 18, 2026)
+
+* **Phase 0 is implemented and covered by `cargo test` (13 passing tests):**
+  * Fixed lexical boost in [`lexical_helper.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/helpers/lexical_helper.rs) + [`find_top_k`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L795-L853) (`chars().count() >= 3`, stopwords, light Ukrainian stemming, non-alphanumeric tokenization).
+  * Implemented search-time `phash` deduplication ([`deduplicate_by_phash`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L855-L884)), [`select_relative`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L886-L902), and [`weak_results`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L904-L924).
+  * Shipped tightened `VLM_PROMPT`, `sanitize_analysis`, `vlm_version = 2` migration, and background `reprocess_vlm` worker ([`maintance_worker.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/maintenance/maintance_worker.rs)): on `mnemosynem_v2.db` (`N = 1,390`), **621 rows** already migrated to `v2` (dropping avg length **`64.4 -> 44.2` words** and fixing **72.0%** legacy `v1` rows whose `description_uk` had been generated in English).
+* **Remaining gaps:** lexical matching still scans only `ocr_text` (not `description_uk`, `description_en`, or `title` — requires **Phase 1A FTS5**), and Stage-2 Reranking (**Phase 1B**, either local `TextRerank` or `gemini-decision-1`) is not implemented yet.

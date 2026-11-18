@@ -20,7 +20,7 @@ flowchart TD
         Inline["Telegram Inline Mode (@bot query anywhere)"]
         pHash["pHash Visual Deduplication (image_hasher POPCNT)"]
         Maintenance["Autonomous Maintenance Worker (Background pHash backfill)"]
-        VlmPool["Multi-Model VLM Pool Failover (503/429 auto-switch)"]
+        VlmPool["Quota-Aware VLM Router (Tiered Balance + 429/404 Cooldowns)"]
         Drip["Meme Drip Delivery (Randomized dopamine scheduler)"]
         Logging["Structured Logging (tracing + timestamps + user attribution)"]
         Resilience["Startup & Network Resilience (retry loops, non-fatal command setup, token masking)"]
@@ -294,17 +294,10 @@ Gemini API includes built-in safety evaluations in `generateContent` responses:
 ]
 ```
 
-#### Dual-Layer Safety Verification:
-1. Parse `safetyRatings` from Gemini HTTP response. If `HARM_CATEGORY_SEXUALLY_EXPLICIT` is `MEDIUM` or `HIGH`, flag immediately.
-2. Prompt instruction: Instruct Gemini to output structured metadata:
-   ```json
-   {
-     "is_nsfw": false,
-     "safety_score": 0.95,
-     "text_verbatim": "...",
-     "description": "..."
-   }
-   ```
+#### Triple-Layer Safety Verification (with `gemini-decision-1` Pre-Gate):
+1. **Pre-Ingestion Binary Gate (`gemini-decision-1`, `POST /v1beta/decisions`):** Evaluate 3 fast `noul`/`score` questions (`is_real_photographic_nudity`, `is_drawn_art_or_comic_meme`, `safety_score`) on separate **`10K RPD / 200 RPM`** quota (~150–250 ms) *before* spending scarce `500 RPD` generative quota, returning calibrated `0.01..0.99` confidence scores instead of flaky string booleans (and avoiding comic false positives).
+2. Parse `safetyRatings` from Gemini `generateContent` HTTP responses. If `HARM_CATEGORY_SEXUALLY_EXPLICIT` is `MEDIUM` or `HIGH`, flag immediately.
+3. Structured generative verification (`is_nsfw`, `ocr_text`, `uk_description`, `en_description`) during VLM indexing.
 
 ### 4.2. Moderation Pipeline
 ```mermaid
@@ -363,12 +356,22 @@ Meme ID: 1793041234
 
 ---
 
-## ⚙️ Milestone 6: Background MPSC Queue & Rate Limiter (v0.3)
-> **Goal:** Strictly enforce Gemini Free Tier quotas (15 RPM and 500 RPD) while decoupling Telegram handler latency.
+## ⚙️ Milestone 6: Background MPSC Queue & Quota-Aware VLM Router (v0.2 / v0.3)
+> **Goal:** Maximize free-tier Gemini throughput (1,000+ RPD / 30+ RPM combined across models), eliminate wasted calls to already-exhausted models, and decouple Telegram handler latency.
 
-1. **`tokio::sync::mpsc::channel(500)`:** Buffered in-memory queue.
-2. **Pacing Worker (`tokio::spawn`):** 4-second minimum sleep between Gemini API calls $\rightarrow$ **guarantees $\le 15$ RPM at all times**.
-3. **Daily Counter:** Tracks requests with an automatic reset at midnight UTC to prevent crossing the 500 RPD threshold.
+### 6.1. Background MPSC Queue & Pacing
+1. **`tokio::sync::mpsc::channel(100..500)`:** Buffered in-memory queue separating upload handlers from VLM analysis.
+2. **Adaptive Worker Pacing (`worker.rs` & `maintance_worker.rs`):** Transition from a static 4-second single-model sleep to dynamic spacing backed by combined active Tier-1 RPM capacity (e.g., 30 RPM = ~2s effective pacing across two 15 RPM Lite models).
+
+### 6.2. Quota-Aware VLM Router & Circuit Breaker ([Detailed Plan](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/docs/vlm-quota-router-plan.md))
+* **API Reality:** Gemini Developer API (`generativelanguage.googleapis.com`) exposes neither an upfront remaining-quota endpoint nor `X-RateLimit-Remaining` headers. Instead, HTTP `429 RESOURCE_EXHAUSTED` JSON `error.details` distinguishes **daily exhaustion (`QuotaFailure`: `PerDay`)** vs **minute bursts (`PerMinute` / `RetryInfo.retryDelay`)**.
+* **Tiered Prioritization & Load Balancing:**
+  * **Tier 1 (`500 RPD / 15 RPM`):** `gemini-3.5-flash-lite`, `gemini-3.1-flash-lite` — sort by highest remaining RPD ratio (breaking ties by fewest calls in last 60s) so load distributes evenly rather than draining one model blindly first.
+  * **Tier 2 (`20 RPD / 5–10 RPM`):** `gemini-2.5-flash-lite`, `gemini-3-flash`, `gemini-2.5-flash`, `gemini-3.6-flash`, `gemini-3.8-flash`, `gemini-4-hydrogen` — reserved strictly as overflow when all Tier-1 capacity is on cooldown.
+* **Smart Cooldowns & Bug Fixes in [`src/vlm.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/vlm.rs):**
+  * Put `PerDay` `429` models on cooldown until **midnight Pacific Time (`America/Los_Angeles`)** (+5m buffer), persisted in SQLite (`vlm_model_quota`) across restarts.
+  * Put `PerMinute` / `TPM` `429` models on short cooldown matching `RetryInfo.retryDelay`.
+  * Fix early-return bug on non-`429`/`503` errors (`404`/`403` currently abort the fallback loop before reaching tail models) and replace per-call `reqwest::Client` creation with one shared pooled client + accurate per-model logging.
 
 ---
 
@@ -457,18 +460,17 @@ Meme ID: 1793041234
 4. **Search-time `phash` duplicates & missing inflection matching:** Duplicate `phash` entries occupy multiple `TOP_K` slots, and raw substring checks fail Ukrainian inflections (`"касі"` vs `"касах"`).
 
 ### 9.2. Phased Implementation Plan
-* **Phase 0 — Immediate Fixes (Zero New Models, Zero DB Migration):**
-  * Replace `w.len() >= 3` with `w.chars().count() >= 3`, filter Ukrainian/English stopwords, tokenize on non-alphanumeric boundaries (`!c.is_alphanumeric()`), and apply light stem/prefix matching (`>= 4` chars) over clean `ocr_text` + non-spam `title`.
-  * Deduplicate ranked results by `phash` within `MAX_PHASH_DISTANCE` at search time so clones never consume multiple `TOP_K` slots.
-  * Replace `> 0.05` with relative score-gap cutoff from Top-1 (`top1 - 0.032` for unconfirmed tails) + weak-result guard.
-  * Tighten VLM prompt in [`src/vlm.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/vlm.rs#L77-L94): ban Markdown layout tags in `ocr_text` and framing boilerplate while preserving concise scene, punchline, and Ukrainian keywords.
+* **Phase 0 — Immediate Fixes (✅ Completed Nov 18, 2026):**
+  * Replaced byte-length `w.len() >= 3` + `.contains()` with [`lexical_helper.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/helpers/lexical_helper.rs) (`chars().count() >= 3`, UA/EN stopwords, whole-token light Ukrainian stemming).
+  * Implemented search-time `phash` deduplication ([`deduplicate_by_phash`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L855)), [`select_relative`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L886), and [`weak_results`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L904) (threshold raised `0.05 -> 0.5`).
+  * Tightened `VLM_PROMPT` + added `sanitize_analysis`, `vlm_version = 2`, and background `reprocess_vlm` ([`maintance_worker.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/maintenance/maintance_worker.rs)) — cutting average word length **`64.4 -> 44.2`** and fixing legacy `v1` English-in-`description_uk` leaks (`72.0% -> 0%` on `621` reprocessed rows).
+  * *Remaining gaps before Phase 1A:* lexical boost currently inspects `ocr_text` only (not `description_uk`/`title`), and `weak_results` skips sets with `< 20` candidates (e.g., small `private_only` scopes).
 * **Phase 1A — Hybrid Stage-1 Retrieval (SQLite FTS5 / BM25 + Vector):**
   * Leverage `rusqlite` `bundled` FTS5 (`-DSQLITE_ENABLE_FTS5` verified active) to index normalized/lightly-stemmed tokens across `ocr_text`, `description_uk`, `description_en`, and `title`.
   * Generate a unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) — avoiding naive equal-weight RRF which degrades zero-overlap synonym recall (`25% -> 0%`).
-* **Phase 1B — Stage-2 Cross-Encoder Reranking (`fastembed::TextRerank`):**
-  * Benchmark `RerankerModel::JINARerankerV2BaseMultiligual` (~1.1 GB, safer for 12 GiB hosts) vs `RerankerModel::BGERerankerV2M3` (~2.2 GB) on latency (`p50`/`p95` over 15–20 candidates) and RSS memory.
-  * Release `meme_store` mutex immediately after Stage-1 candidate fetch; run `TextRerank` inside `tokio::task::spawn_blocking` under a dedicated lock so async polling and ingestion workers never stall.
-  * Apply calibrated Cross-Encoder logit threshold for true negative rejection ("nothing relevant found" on out-of-domain queries).
+* **Phase 1B — Stage-2 Reranking & Calibrated Validation (`TextRerank` or `gemini-decision-1`):**
+  * **Local option (`fastembed::TextRerank`):** Benchmark `JINARerankerV2BaseMultiligual` (~1.1 GB) vs `BGERerankerV2M3` (~2.2 GB) in `tokio::task::spawn_blocking` after releasing `meme_store` mutex.
+  * **Cloud zero-RAM option (`gemini-decision-1`, `POST /v1beta/decisions`):** Evaluate Top-15 Stage-1 candidate descriptions in 1 batch call (`noul` / `score`, **0 output tokens**, ~150–250 ms RTT, `10K RPD / 200 RPM / 50K TPM`) for `/search` reranking and calibrated rejection without extra RAM or free-text parsing.
 * **Phase 2 — Golden Evaluation Suite & Future Multi-Vector / `BGEM3Q`:**
   * Codify golden benchmark queries (`standard`, `syn_zero`, `NEGATIVE`) to track `Hit@3`, `MRR`, and false-positive rejection across changes.
   * Evaluate structured 3-vector blending (`holistic + scene + meaning`, avoiding naive sentence-max noise) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
@@ -565,6 +567,12 @@ Meme ID: 1793041234
   - [x] Dual Multilingual Embeddings: separate Ukrainian & English vector spaces with OCR exact keyword boosting.
   - [x] Standalone Database Migrations Engine (`src/migrations.rs`) with atomic batching & `_migrations` tracking.
   - [x] Multi-Model VLM Fallback Pool (`GEMINNI_MODEL_POOL`): automated failover across `3.5-flash-lite`, `3.1-flash-lite`, `3.5-flash`, `3.6-flash`, `3.8-flash` on 503/429 spikes.
+  - [ ] **⚡ Quota-Aware VLM Model Router & Circuit Breaker (see [docs/vlm-quota-router-plan.md](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/docs/vlm-quota-router-plan.md)):**
+    - [ ] Verify exact Gemini API model IDs via `GET /v1beta/models` (remove dead/missing models like `gemini-3.5-flash`, add `gemini-2.5-flash-lite`, `gemini-3-flash`, `gemini-2.5-flash`, `gemini-4-hydrogen`).
+    - [ ] Replace static `GEMINNI_MODEL_POOL` iteration with `VlmRouter`: separate Tier-1 (`500 RPD`: `3.5-flash-lite`, `3.1-flash-lite`) from Tier-2 (`20 RPD`), load-balancing Tier-1 by highest estimated remaining RPD % and lowest 60s RPM usage.
+    - [ ] Parse `429` JSON `QuotaFailure` (`PerDay` ➔ cooldown until midnight PT + 5m buffer) and `RetryInfo.retryDelay` (`PerMinute`/TPM ➔ short cooldown); disable `404`/`403` models and continue failover loop instead of returning early.
+    - [ ] Reuse a single shared `reqwest::Client` in `VlmRouter`, log the actual chosen model (`used_today/rpd_limit`), and release mutex locks strictly before `.await`.
+    - [ ] Persist per-model PT-day usage & cooldowns in SQLite (`vlm_model_quota`) via `src/migrations.rs` and share `Arc<VlmRouter>` across `worker.rs` and `maintance_worker.rs`.
   - [x] Progressive backoff and retry queue (5s, 10s) on transient VLM errors with sender requeue.
   - [x] Markdown code fence cleanup (`clean_json`) and Serde field aliases in VLM response parser.
   - [x] Worker image download retry loop with backoff on Telegram network resets.
@@ -572,17 +580,17 @@ Meme ID: 1793041234
   - [x] Network fault tolerance for bot startup (`set_my_commands` retry loop with non-fatal fallback on connection reset/network drop).
   - [x] Token & secret masking in startup logs (`TELOXIDE_TOKEN: [CONFIGURED]`).
   - [ ] **🔥 Search Quality & Hybrid Retrieval Overhaul (TOP PRIORITY — see `docs/search-research/`):**
-    - [ ] **Phase 0 (Quick Wins):**
-      - [x] Fix `ocr_text` boost in `find_top_k`: use `w.chars().count() >= 3` instead of UTF-8 byte `.len()`, add UA/EN stopwords list, and match whole normalized tokens / light prefix stems instead of raw `.contains()`.
+    - [x] **Phase 0 (Quick Wins — Audited Nov 18, 2026):**
+      - [x] Fix `ocr_text` boost in `find_top_k`: implemented via `lexical_helper.rs` (`chars().count() >= 3`, UA/EN stopwords, whole-token light Ukrainian stemming).
       - [x] Search-time `phash` deduplication in `find_top_k` (`MAX_PHASH_DISTANCE`) so clone memes never occupy multiple `TOP_K` slots.
-      - [x] Replace `best_score > 0.05` with relative score-gap cutoff from Top-1 (`gap_cutoff`) + weak-result guard.
-      - [ ] Refactor VLM prompt in `src/vlm.rs`: forbid Markdown layout tags (`*Top text:*`) and prose boilerplate; enforce concise scene + joke meaning + Ukrainian keywords.
+      - [x] Replace `best_score > 0.05` with relative score-gap cutoff (`select_relative` + `weak_results`, min floor `0.5`). *(Follow-up: cover `<20`-candidate scopes like `private_only`.)*
+      - [x] Refactor VLM prompt & post-sanitizer (`src/vlm.rs`), plus `vlm_version=2` migration & background `reprocess_vlm` (`maintance_worker.rs` — already migrated 621 rows, cutting avg words `64.4 -> 44.2` and eliminating 72% `v1` English-in-`description_uk` leaks).
     - [ ] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
-      - [ ] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title`, kept in sync on inserts/updates.
+      - [ ] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title` (closing the current gap where `count_lexical_matches` scans `ocr_text` only), kept in sync on inserts/updates.
       - [ ] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
-    - [ ] **Phase 1B (Stage-2 Cross-Encoder Reranking):**
-      - [ ] Benchmark `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` vs `BGERerankerV2M3`) for p50/p95 CPU latency on 15–20 candidates and RSS memory budget.
-      - [ ] Integrate `TextRerank` in `tokio::task::spawn_blocking` under a dedicated lock (releasing `meme_store` mutex before inference) + calibrated negative-rejection threshold.
+    - [ ] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local or `gemini-decision-1`):**
+      - [ ] Evaluate local `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` vs `BGERerankerV2M3`) latency/RAM vs zero-RAM **`gemini-decision-1`** (`POST /v1beta/decisions`) batch scoring Top-15 Stage-1 candidates (`10K RPD / 200 RPM / 50K TPM`, 0 output tokens).
+      - [ ] Integrate Stage-2 reranker cleanly outside `meme_store` mutex (`tokio::task::spawn_blocking` for local ONNX or async `reqwest` for `Decision 1` on `/search` & borderline `weak_results`) + calibrated rejection threshold.
     - [ ] **Phase 2 (Evaluation & Long-Term Scaling):**
       - [ ] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
       - [ ] Evaluate structured 3-vector blending (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
@@ -605,7 +613,7 @@ Meme ID: 1793041234
     - [ ] Track Gemini Free Tier quotas consumed (RPD counter & RPM pacing).
     - [ ] Measure vector search execution latency (ms) and FastEmbed inference time.
   - [ ] Automatic meme categorization & Hashtag directory (`/tags`):
-    - [ ] Prompt Gemini VLM to extract 2–4 normalized tags/categories per meme.
+    - [ ] Use **`gemini-decision-1`** (`POST /v1beta/decisions`) batch `noul` checks against a fixed normalized taxonomy (30–100 categories in 1 call over `ocr_text + description_uk` — zero text-generation tag drift, fits within `10K RPD` backfill).
     - [ ] Create SQLite tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
     - [ ] Implement `/tags` command displaying all categories with live meme counts (`#category (N)`).
     - [ ] Add interactive Inline buttons on `/tags` to trigger one-tap inline search for selected tag.
@@ -630,6 +638,7 @@ Meme ID: 1793041234
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
   - [x] Nuanced NSFW policy: strict photographic nudity protection with explicit cultural art/medieval illustration exemptions.
+  - [ ] Add `gemini-decision-1` pre-ingestion safety & spam gate (`noul`/`score` on `10K RPD` quota before calling `Flash Lite`, preventing comic false positives and returning calibrated `safety_score`).
   - [ ] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**

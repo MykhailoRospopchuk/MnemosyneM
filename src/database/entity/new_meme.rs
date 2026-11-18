@@ -12,4 +12,5 @@ pub struct NewMeme<'a> {
     pub phash: u64,
     pub media_type: MediaType,
     pub thumbnail_tg_id: String,
+    pub vlm_version: i64,
 }

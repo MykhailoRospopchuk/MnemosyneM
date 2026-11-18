@@ -134,16 +134,45 @@ Experiment 3 showed that splitting into 8–10 sentence vectors and taking raw `
 ## 🤖 Alternative B: Search-Time LLM Query Rewriting / HyDE (Gemini)
 
 Using Gemini to expand `"тренування в спортзалі"` into synonyms/scenarios before vector search:
-* **Why NOT on the hot path (especially inline mode):** adds `300–1,000 ms` HTTP latency on every search and burns free-tier [`GEMINNI_MODEL_POOL`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/vlm.rs#L10-L16) RPM quota reserved for meme indexing.
+* **Why NOT on the hot path (especially inline mode):** adds `300–1,000 ms` HTTP latency on every search and burns free-tier generative quota reserved for meme indexing.
 * **Viable niche:** Strictly as an explicit opt-in fallback button (`"🔍 Deep AI Search"`) shown when local Hybrid + Reranker returns zero confident matches.
 
 ---
 
-## 🗺️ Recommended Rollout Plan
+## 🎯 Alternative C: Gemini Decisions API (`gemini-decision-1`) — Calibrated Judgments Without Free-Text Parsing
 
-| Step | Changes | Expected Impact | Migration Needed |
+Unlike generative Gemini models that stream token-by-token prose/JSON (requiring fragile cleanup like `unwrap_vlm_value`, `deserialize_flexible_bool`, and layout-prefix stripping in [`src/vlm.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/vlm.rs#L35-L385)), **`gemini-decision-1`** (`POST https://generativelanguage.googleapis.com/v1beta/decisions`) evaluates **up to 1,000 closed-form questions** against a shared multimodal context in **one single forward pass** with **`0` output tokens** (~50–100 ms compute, ~150–250 ms end-to-end; AI Studio Free Tier: **`200 RPM` / `50K TPM` / `10K RPD`**).
+
+Supported question types:
+* **`noul` (Yes / No):** calibrated probability `0.01..0.99` + `confidence`.
+* **`choice` (Single-Select):** evaluates 2–255 labeled options (`criteria`) with per-option probabilities.
+* **`score` (Rubric Rating):** evaluates 2–255 ordered rubric levels, returning a probability-weighted expected score.
+
+### Where `gemini-decision-1` Fits Best in MnemosyneM
+
+1. **Cloud Stage-2 Search Reranker / Borderline Validator (Alternative to 2.2 GB Local `TextRerank`):**
+   * **Use case:** Pass a user's `/search` query + Top-15 Stage-1 candidates (`ocr_text + description_uk`, ~1,000–1,500 input tokens total) and evaluate 15 parallel `noul` / `score` questions (*"Does meme #i genuinely match the user's intent?"*).
+   * **Benefit:** Solves `"3 words vs 45–65 words"` dilution and borderline rejection (`weak_results` `< 0.82`) with **0 GB extra RAM** on the host and calibrated confidence scores, without burning generative `500 RPD` quota.
+   * **Caveat:** Keep inline hot-path (`handle_inline_query` while typing) strictly local (`Vector + FTS5`); use `gemini-decision-1` for explicit `/search`, `"Deep Search"` fallback, or when `weak_results` / low-confidence ties occur.
+2. **Pre-Ingestion NSFW, Safety & Spam Gate (Before Generative `Flash Lite`):**
+   * **Problem today:** Every image/GIF immediately hits scarce `500 RPD` Flash Lite quota, and generative `is_nsfw` booleans still falsely reject drawn comedy comics (e.g., `id=1794231524`, `vlm_version=-2`).
+   * **With `Decision 1`:** Run 3 `noul` checks (`is_real_photographic_nudity`, `is_drawn_art_or_comic_meme`, `is_non_meme_ad_or_receipt`) with separate `10K RPD` quota. Reject spam/explicit photos in ~200 ms before touching `500 RPD` generative quota, and store calibrated `safety_score` (`0.01..0.99`) for `Milestone 4`.
+3. **Deterministic Taxonomy Tagging for `/tags`:**
+   * Batch 30–100 fixed Ukrainian category tags as `noul` questions in **one call per meme** over compact existing text (`ocr_text + description_uk`, ~100 input tokens -> keeps within **`50K TPM`** easily and can backfill ~1,390 memes inside one day's `10K RPD` quota). Zero tag drift (`#it` vs `#айті` vs `#програмування`).
+4. **Output Sanity Validation:**
+   * Spot-check or validate generated `uk_description` quality (e.g., catching legacy-style failures where 72% of `v1` rows had English text in `description_uk`) with a single `noul` check rather than brittle regex heuristics.
+
+> [!IMPORTANT]
+> **Quota Bottleneck Note:** On Free Tier, `gemini-decision-1` gives **200 RPM / 10K RPD** but **50K TPM** (input tokens per minute). Prefer passing compact text (`ocr_text + description_uk`) for bulk tasks (tagging, reranking), and reserve image/MP4 payloads for single-upload gates so `50K TPM` is not saturated during backfills.
+
+---
+
+## 🗺️ Updated Rollout Plan (Status as of Nov 18, 2026)
+
+| Step | Changes | Status / Observed Notes | Migration Needed |
 | :--- | :--- | :--- | :---: |
-| **Step 1 (Immediate)** | Fix `w.chars().count() >= 3` + stopwords + word-boundary tokenization; deduplicate results by `phash`; replace `> 0.05` with relative gap cutoff | Eliminates false `"на"`/`"очі"` spam (`Свінабони`, `12 карієсів`) and duplicate Matrix slots immediately | None |
-| **Step 2** | Add SQLite FTS5 / in-memory BM25 (`ocr + desc + keywords`) + `Top-20 Vector ∪ Top-20 BM25` candidate union + clean VLM prompt without Markdown noise | Near-100% accuracy on OCR/scene/inflected queries; cleaner new entries | Minor (FTS5 built from existing columns) |
-| **Step 3 (Biggest Quality Jump)** | Integrate `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` or `BGERerankerV2M3` after latency/RAM bench) over Top-15–20 candidates + logit threshold | Solves `3 vs 70 words` dilution on hidden punchlines & zero-overlap synonyms; clean negative rejection | None |
-| **Step 4 (Long-Term Scaling)** | Evaluate balanced multi-vector (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense+Sparse) gated by an automated golden test suite (`Hit@3`, `MRR`, `syn_zero`, `NEGATIVE`) | Scales cleanly to 10k–100k+ memes without regression | Yes (re-indexing) |
+| **Step 1 (Phase 0 — Shipped)** | Fixed UTF-8 byte & `.contains()` bug in [`lexical_helper.rs`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/helpers/lexical_helper.rs); added [`deduplicate_by_phash`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L855), [`select_relative`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L886), [`weak_results`](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/src/meme_store.rs#L904), concise `VLM_PROMPT`, and `vlm_version=2` reprocessing | **✅ Done** (`13/13` unit tests pass; `621` rows reprocessed, avg `64.4 -> 44.2` words, `0%` English leak on `v2` vs `72%` on `v1`). *Note:* `weak_results` skips `<20` candidates (e.g. small `private_only` sets) | In progress via background worker (`768` `v1` rows left) |
+| **Step 2 (Phase 1A)** | Add SQLite FTS5 (`memes_fts`) indexing normalized/stemmed `ocr_text + description_uk + description_en + clean title` + `Top-20 Vector ∪ Top-20 FTS5` union (fixing the current gap where `count_lexical_matches` sees only `ocr_text`) | **Next** | Minor (virtual FTS5 table from existing rows) |
+| **Step 3 (Phase 1B)** | Stage-2 Reranking & Validation: benchmark local `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` / `BGERerankerV2M3`) **or** batch `gemini-decision-1` (`POST /v1beta/decisions`) for `/search` reranking, NSFW pre-gate, and `/tags` classification | **Planned** | None (for rerank) / `tags` tables for `/tags` |
+| **Step 4 (Phase 2)** | Automated golden evaluation suite (`Hit@3`, `MRR`, `syn_zero`, `NEGATIVE`); evaluate balanced 3-vector blending or `BGEM3Q` as catalog scales | **Planned** | Yes (if changing embeddings) |
+

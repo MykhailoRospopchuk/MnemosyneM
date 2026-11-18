@@ -3,7 +3,7 @@ use std::time::SystemTime;
 use rusqlite::{Connection, params};
 
 use crate::engine::ClipEngine;
-use crate::helpers::embeding_helper::embedding_to_blob;
+use crate::helpers::embeding_helper::{embedding_to_blob, format_embedding_passage};
 
 pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     let mut conn = Connection::open(dp_path).map_err(|e| e.to_string())?;
@@ -21,6 +21,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     recalculate_embeddings(&mut conn, engine)?;
     add_hash_column_to_memes(&mut conn)?;
     add_media_type_column(&mut conn)?;
+    add_vlm_version_column(&mut conn)?;
 
     Ok(())
 }
@@ -73,12 +74,12 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
             let passage_uk = if ocr_text.is_empty() {
                 desc_uk.clone()
             } else {
-                format!("{} | {}", ocr_text, desc_uk)
+                format_embedding_passage(&ocr_text, &desc_uk)
             };
             let passage_en = if ocr_text.is_empty() {
                 desc_en.clone()
             } else {
-                format!("{} | {}", ocr_text, desc_en)
+                format_embedding_passage(&ocr_text, &desc_en)
             };
             let embed_uk = engine.embed_passage(&passage_uk)?;
             let embed_en = engine.embed_passage(&passage_en)?;
@@ -220,6 +221,64 @@ fn add_media_type_column(conn: &mut Connection) -> Result<(), String> {
     if !has_thumbnail {
         conn.execute(
             "ALTER TABLE memes ADD COLUMN thumbnail_tg_id TEXT NOT NULL DEFAULT ''",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    Ok(())
+}
+
+fn add_vlm_version_column(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1794937142_add_vlm_version_column".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    println!(
+        "[MIGRATION] - {}: Adding vlm version column to memes table...",
+        migration_name
+    );
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memes)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_vlm_version = false;
+    for column in columns.flatten() {
+        if column == "vlm_version" {
+            has_vlm_version = true;
+        }
+    }
+
+    drop(stmt);
+
+    if !has_vlm_version {
+        conn.execute(
+            "ALTER TABLE memes ADD COLUMN vlm_version BIGINT NOT NULL DEFAULT 1",
             [],
         )
         .map_err(|e| e.to_string())?;

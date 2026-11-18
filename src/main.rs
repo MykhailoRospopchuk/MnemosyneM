@@ -1,5 +1,6 @@
 mod bot;
 mod config;
+mod constants;
 mod database;
 mod engine;
 mod helpers;
@@ -52,7 +53,12 @@ async fn main() {
         app_config,
     );
 
-    maintance_worker::start_maintenance(Arc::clone(&state), bot.clone());
+    maintance_worker::start_maintenance(
+        Arc::clone(&state),
+        bot.clone(),
+        app_config,
+        sender.clone(),
+    );
 
     println!("Let's get it started");
 

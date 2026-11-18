@@ -11,3 +11,11 @@ pub fn blob_to_embedding(blob: &[u8]) -> Vec<f32> {
         .map(|chunk| f32::from_le_bytes(*chunk))
         .collect()
 }
+
+pub fn format_embedding_passage(ocr_text: &str, description: &str) -> String {
+    if ocr_text.is_empty() {
+        description.to_string()
+    } else {
+        format!("{} | {}", ocr_text, description)
+    }
+}

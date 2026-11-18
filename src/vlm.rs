@@ -8,9 +8,8 @@ use serde_json::json;
 use crate::database::enums::vlm_error_enum::VlmError;
 
 const GEMINNI_MODEL_POOL: &[&str] = &[
-    "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
-    "gemini-3.5-flash",
+    "gemini-3.5-flash-lite",
     "gemini-3.6-flash",
     "gemini-3.8-flash",
 ];
@@ -55,6 +54,33 @@ where
     }
 }
 
+const VLM_PROMPT: &str = r#"
+You are a meme indexing engine.
+
+SAFETY RULES:
+1. ART, DRAWINGS & SATIRE ARE ALWAYS SAFE:
+   Medieval illuminations, historical paintings, frescoes, statues, cartoons, comics, sketches, caricatures, and drawn art are CULTURAL HERITAGE, ART & HUMOR.
+   Set "is_nsfw": false for ALL drawings, medieval art, paintings, and caricatures regardless of any anatomical humor.
+2. REAL-LIFE PHOTOGRAPHIC NUDITY ONLY:
+   Set "is_nsfw": true ONLY for REAL-LIFE PHOTOGRAPHS depicting explicit human genitalia or direct real-life sexual acts.
+3. Erotic jokes, wordplay, double entendres, underwear, and suggestive memes are SAFE ("is_nsfw": false).
+
+TASK:
+Return a single JSON object (no Markdown fences, no extra prose) with these exact fields:
+- "is_nsfw": boolean.
+- "ocr_text": exact verbatim text written inside the meme image ONLY ("" if none).
+  * STRICT: Plain text only. Do NOT include Markdown formatting (*, **, _), bullet points, or layout/position labels such as "Top text:", "Bottom text:", "Left:", "Right:", "Caption:", "Panel 1:".
+- "uk_description": concise Ukrainian search summary (25-45 words total).
+  * STRICT: Do NOT use framing boilerplate ("На зображенні...", "На фото...", "Мем складається з...", "Скріншот...", "Ключові слова:"). No Markdown.
+  * Write in 3 compact parts separated by spaces/commas:
+    1) Scene, recognizable template name (if any), characters, and facial expression/action (<= 15 words).
+    2) Core joke punchline and the real-life situation when someone sends this meme (<= 18 words).
+    3) 6-10 dense Ukrainian search keywords, slang, and synonyms separated by commas.
+- "en_description": concise English search summary (25-40 words total).
+  * STRICT: Do NOT use framing boilerplate ("The image shows...", "This meme consists of...", "A screenshot of...", "Keywords:"). No Markdown.
+  * Include: meme template name (if known), 1 short sentence describing the scene and punchline, and 5-8 English search keywords separated by commas.
+"#;
+
 pub async fn describe_meme(
     image_bytes: &[u8],
     api_key: &str,
@@ -74,24 +100,7 @@ pub async fn describe_meme(
         image_bytes.len() / 1024
     );
 
-    let prompt = "
-        You are a meme indexing engine.
-
-        SAFETY RULES:
-        1. ART, DRAWINGS & SATIRE ARE ALWAYS SAFE:
-            Medieval illuminations, historical paintings, frescoes, statues, cartoons, comics, sketches, caricatures, and drawn art are CULTURAL HERITAGE, ART & HUMOR.
-            Set 'is_nsfw': false for ALL drawings, medieval art, paintings, and caricatures regardless of any anatomical humor.
-        2. REAL-LIFE PHOTOGRAPHIC NUDITY ONLY:
-            Set 'is_nsfw': true ONLY for REAL-LIFE PHOTOGRAPHS depicting explicit human genitalia or direct real-life sexual acts.
-        3. Erotic jokes, wordplay, double entendres, underwear, and suggestive memes are SAFE ('is_nsfw': false).
-        TASK:
-        Extract all text from this meme verbatim. Then briefly describe the scene, characters, and the joke context in both Ukrainian and English so it can be easily found by keywords.
-        JSON fields to return:
-        - 'is_nsfw': boolean (false for all drawings, art, memes, and caricatures; true ONLY for real-life photographic pornography)
-        - 'ocr_text': exact verbatim text written on the meme (empty string if none)
-        - 'uk_description': describe the scene, characters, joke context, and key search keywords in Ukrainian.
-        - 'en_description': meme template name, scene description, and key search keywords in English.
-        ";
+    let prompt = VLM_PROMPT;
 
     let body = json!({
         "contents": [{
@@ -294,6 +303,68 @@ fn extract_json_slice(text: &str) -> &str {
     text
 }
 
+fn strip_layout_prefix(line: &str) -> &str {
+    const PREFIXES: &[&str] = &[
+        "top text:",
+        "bottom text:",
+        "left text:",
+        "left side:",
+        "left:",
+        "right text:",
+        "right side:",
+        "right:",
+        "caption:",
+        "panel 1:",
+        "panel 2:",
+        "panel 3:",
+        "panel 4:",
+    ];
+
+    let mut s = line.trim();
+    // Strip markdown bullet/emphasis markers wrapping layout labels like "*Top text:*"
+    if let Some(rest) = s.strip_prefix("- ").or_else(|| s.strip_prefix("* ")) {
+        s = rest.trim_start();
+    }
+    let unwrapped = s.trim_start_matches(['*', '_']).trim_start();
+
+    for prefix in PREFIXES {
+        if unwrapped
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+        {
+            return unwrapped[prefix.len()..]
+                .trim_start_matches(['*', '_', ' '])
+                .trim();
+        }
+    }
+
+    s
+}
+
+fn clean_ocr_text(raw: &str) -> String {
+    raw.lines()
+        .map(strip_layout_prefix)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn clean_description(raw: &str) -> String {
+    let mut cleaned = raw.trim().to_string();
+    for marker in ["Ключові слова:", "ключові слова:", "Keywords:", "keywords:"]
+    {
+        cleaned = cleaned.replace(marker, "");
+    }
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn sanitize_analysis(mut analysis: MemeAnalysis) -> MemeAnalysis {
+    analysis.ocr_text = clean_ocr_text(&analysis.ocr_text);
+    analysis.uk_description = clean_description(&analysis.uk_description);
+    analysis.en_description = clean_description(&analysis.en_description);
+    analysis
+}
+
 pub fn parse_meme_analysis(raw_text: &str) -> Result<MemeAnalysis, VlmError> {
     let cleaned = strip_markdown_fences(raw_text);
     let json_slice = extract_json_slice(cleaned);
@@ -305,8 +376,11 @@ pub fn parse_meme_analysis(raw_text: &str) -> Result<MemeAnalysis, VlmError> {
         VlmError::Transient(format!("JSON unwrap error: {} | Raw: {}", e, raw_text))
     })?;
 
-    serde_json::from_value(unwrapped)
-        .map_err(|e| VlmError::Transient(format!("JSON decode error: {} | Raw: {}", e, raw_text)))
+    let analysis: MemeAnalysis = serde_json::from_value(unwrapped).map_err(|e| {
+        VlmError::Transient(format!("JSON decode error: {} | Raw: {}", e, raw_text))
+    })?;
+
+    Ok(sanitize_analysis(analysis))
 }
 
 #[cfg(test)]
@@ -352,5 +426,26 @@ mod tests {
         assert!(!parse_meme_analysis(raw_zero).unwrap().is_nsfw);
         assert!(parse_meme_analysis(raw_one).unwrap().is_nsfw);
         assert!(parse_meme_analysis(raw_str_true).unwrap().is_nsfw);
+    }
+
+    #[test]
+    fn strips_layout_labels_and_keyword_boilerplate_without_breaking_profanity() {
+        let raw = r#"{
+            "is_nsfw": false,
+            "ocr_text": "*Top text:* Коли дедлайн вчора\nBottom text: f*ck this",
+            "uk_description": "Кіт у паніці дивиться на монітор. Ключові слова: кіт, дедлайн, паніка",
+            "en_description": "Panicked cat staring at monitor. Keywords: cat, deadline, panic"
+        }"#;
+
+        let parsed = parse_meme_analysis(raw).unwrap();
+        assert_eq!(parsed.ocr_text, "Коли дедлайн вчора\nf*ck this");
+        assert_eq!(
+            parsed.uk_description,
+            "Кіт у паніці дивиться на монітор. кіт, дедлайн, паніка"
+        );
+        assert_eq!(
+            parsed.en_description,
+            "Panicked cat staring at monitor. cat, deadline, panic"
+        );
     }
 }

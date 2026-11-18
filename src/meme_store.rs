@@ -1,6 +1,8 @@
-use crate::config::AppConfig;
+use crate::{
+    config::AppConfig, helpers::embeding_helper::format_embedding_passage, vlm::MemeAnalysis,
+};
 use rusqlite::{Connection, params};
-use std::{collections::HashMap, time::SystemTime};
+use std::{collections::HashMap, path::Path, time::SystemTime};
 
 use crate::{
     database::{
@@ -23,6 +25,12 @@ pub struct MemeStore {
     conn: Connection,
     memes: Vec<Meme>,
     user_settings: HashMap<i64, UserSetting>,
+}
+
+pub struct ReprocessCandidate {
+    pub id: u64,
+    pub file_tg_id: String,
+    pub media_type: MediaType,
 }
 
 impl MemeStore {
@@ -73,13 +81,13 @@ impl MemeStore {
         new_meme: NewMeme<'_>,
         engine: &mut ClipEngine,
     ) -> Result<(), String> {
-        let passage_uk = format!(
-            "{} | {}",
-            new_meme.analysis.ocr_text, new_meme.analysis.uk_description
+        let passage_uk = format_embedding_passage(
+            &new_meme.analysis.ocr_text,
+            &new_meme.analysis.uk_description,
         );
-        let passage_en = format!(
-            "{} | {}",
-            new_meme.analysis.ocr_text, new_meme.analysis.en_description
+        let passage_en = format_embedding_passage(
+            &new_meme.analysis.ocr_text,
+            &new_meme.analysis.en_description,
         );
 
         let embed_uk = engine
@@ -104,9 +112,9 @@ impl MemeStore {
                 "INSERT INTO memes (
                     id, title, ocr_text, description_uk, description_en,
                     embedding_uk, embedding_en,
-                    file_tg_id, file_tg_unique_id, source_title, source_url, phash, media_type, thumbnail_tg_id
+                    file_tg_id, file_tg_unique_id, source_title, source_url, phash, media_type, thumbnail_tg_id, vlm_version
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (file_tg_unique_id)
                 DO UPDATE SET
                     title = excluded.title,
@@ -119,7 +127,8 @@ impl MemeStore {
                     source_url = excluded.source_url,
                     phash = excluded.phash,
                     media_type = excluded.media_type,
-                    thumbnail_tg_id = excluded.thumbnail_tg_id;",
+                    thumbnail_tg_id = excluded.thumbnail_tg_id,
+                    vlm_version = excluded.vlm_version;",
                 params![
                     new_meme.id,
                     new_meme.title,
@@ -134,7 +143,8 @@ impl MemeStore {
                     new_meme.source_url,
                     new_meme.phash as i64,
                     new_meme.media_type.as_i32(),
-                    new_meme.thumbnail_tg_id
+                    new_meme.thumbnail_tg_id,
+                    new_meme.vlm_version
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -247,7 +257,8 @@ impl MemeStore {
                 source_url TEXT NOT NULL DEFAULT '',
                 phash BIGINT NOT NULL DEFAULT 0,
                 media_type INTEGER NOT NULL DEFAULT 0,
-                thumbnail_tg_id TEXT NOT NULL DEFAULT ''
+                thumbnail_tg_id TEXT NOT NULL DEFAULT '',
+                vlm_version BIGINT NOT NULL DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -666,6 +677,101 @@ impl MemeStore {
 
         Ok(())
     }
+
+    pub fn get_memes_for_reprocess(
+        &self,
+        target_vlm_version: i64,
+        limit: Option<usize>,
+    ) -> Vec<ReprocessCandidate> {
+        let lim = limit.unwrap_or(500);
+
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, file_tg_id, media_type
+                FROM memes
+                WHERE vlm_version >= 0 AND vlm_version < ?
+                ORDER BY id
+                LIMIT ?;",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(reprocess_candidate) = stmt.query_map(params![target_vlm_version, lim], |row| {
+            Ok(ReprocessCandidate {
+                id: row.get(0)?,
+                file_tg_id: row.get(1)?,
+                media_type: row.get(2).unwrap_or(MediaType::Photo),
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        reprocess_candidate.flatten().collect()
+    }
+
+    pub fn update_meme_reprocessed(
+        &mut self,
+        meme_id: u64,
+        analysis: &MemeAnalysis,
+        embed_uk: Vec<f32>,
+        embed_en: Vec<f32>,
+        vlm_version: i64,
+    ) -> Result<(), String> {
+        let blob_uk = embedding_to_blob(&embed_uk);
+        let blob_en = embedding_to_blob(&embed_en);
+
+        self.conn
+            .execute(
+                "UPDATE memes
+                SET ocr_text = ?,
+                    description_uk = ?,
+                    description_en = ?,
+                    embedding_uk = ?,
+                    embedding_en = ?,
+                    vlm_version = ?
+                WHERE id = ?",
+                params![
+                    analysis.ocr_text,
+                    analysis.uk_description,
+                    analysis.en_description,
+                    blob_uk,
+                    blob_en,
+                    vlm_version,
+                    meme_id
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            meme.ocr_text = analysis.ocr_text.clone();
+            meme.embedding_uk = embed_uk;
+            meme.embedding_en = embed_en
+        }
+
+        Ok(())
+    }
+
+    pub fn mark_meme_vlm_version(&mut self, meme_id: u64, vlm_version: i64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE memes
+                SET vlm_version = ?
+                WHERE id = ?",
+                params![vlm_version, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    pub fn create_pre_process_backup(&self, backup_path: String) -> Result<(), String> {
+        if !Path::new(&backup_path).exists() {
+            self.conn
+                .execute("VACUUM INTO ?", params![backup_path])
+                .map_err(|e| e.to_string())?;
+        }
+
+        Ok(())
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
@@ -945,6 +1051,7 @@ mod tests {
             top_k: 2,
             gemini_api_key: String::new(),
             max_phash_distance: 5,
+            auto_reprocess: false,
         };
 
         let clone_a = make_test_meme(
@@ -989,6 +1096,7 @@ mod tests {
             top_k: 3,
             gemini_api_key: String::new(),
             max_phash_distance: 5,
+            auto_reprocess: false,
         };
 
         let exact = make_test_meme(1, 0x1000, "шоколадки", vec![1.0, 0.0]);
