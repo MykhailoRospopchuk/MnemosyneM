@@ -2,8 +2,10 @@ use std::time::SystemTime;
 
 use rusqlite::{Connection, params};
 
+use crate::database::entity::memes_fts::MemesFts;
 use crate::engine::ClipEngine;
-use crate::helpers::embeding_helper::{embedding_to_blob, format_embedding_passage};
+use crate::helpers::db_helper;
+use crate::helpers::embeding_helper;
 
 pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     let mut conn = Connection::open(dp_path).map_err(|e| e.to_string())?;
@@ -22,6 +24,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_hash_column_to_memes(&mut conn)?;
     add_media_type_column(&mut conn)?;
     add_vlm_version_column(&mut conn)?;
+    add_memes_fts_index(&mut conn)?;
 
     Ok(())
 }
@@ -74,17 +77,17 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
             let passage_uk = if ocr_text.is_empty() {
                 desc_uk.clone()
             } else {
-                format_embedding_passage(&ocr_text, &desc_uk)
+                embeding_helper::format_embedding_passage(&ocr_text, &desc_uk)
             };
             let passage_en = if ocr_text.is_empty() {
                 desc_en.clone()
             } else {
-                format_embedding_passage(&ocr_text, &desc_en)
+                embeding_helper::format_embedding_passage(&ocr_text, &desc_en)
             };
             let embed_uk = engine.embed_passage(&passage_uk)?;
             let embed_en = engine.embed_passage(&passage_en)?;
-            let blob_uk = embedding_to_blob(&embed_uk);
-            let blob_en = embedding_to_blob(&embed_en);
+            let blob_uk = embeding_helper::embedding_to_blob(&embed_uk);
+            let blob_en = embeding_helper::embedding_to_blob(&embed_en);
             update_stmt
                 .execute(params![blob_uk, blob_en, id])
                 .map_err(|e| e.to_string())?;
@@ -283,6 +286,80 @@ fn add_vlm_version_column(conn: &mut Connection) -> Result<(), String> {
         )
         .map_err(|e| e.to_string())?;
     }
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    Ok(())
+}
+
+fn add_memes_fts_index(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795026302_add_memes_fts_index".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    println!(
+        "[MIGRATION] - {}: Adding memes fts virtual table...",
+        migration_name
+    );
+
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memes_fts USING fts5 (
+            ocr_norm,
+            uk_norm,
+            en_norm,
+            title_norm
+        )",
+        [],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut stmt = conn
+        .prepare("SELECT id, ocr_text, description_uk, description_en, title FROM memes")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            let id: u64 = row.get(0)?;
+            let ocr_text: String = row.get(1)?;
+            let desc_uk: String = row.get(2)?;
+            let desc_en: String = row.get(3)?;
+            let title: String = row.get(4)?;
+            Ok(MemesFts::from_raw(
+                id, &ocr_text, &desc_uk, &desc_en, &title,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    let memes_to_update: Vec<MemesFts> = rows.filter_map(|r| r.ok()).collect();
+    drop(stmt);
+
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for meme in memes_to_update {
+        if let Err(e) = db_helper::upsert_fts_entry(&tx, meme) {
+            eprintln!(
+                "[MIGRATION]-[ERROR] - {}: error to insert meme_fts: {}",
+                migration_name, e
+            );
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

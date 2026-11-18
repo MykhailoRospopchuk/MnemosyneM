@@ -1,5 +1,10 @@
 use crate::{
-    config::AppConfig, helpers::embeding_helper::format_embedding_passage, vlm::MemeAnalysis,
+    config::AppConfig,
+    database::entity::memes_fts::MemesFts,
+    helpers::{
+        db_helper::upsert_fts_entry, embeding_helper::format_embedding_passage, lexical_helper,
+    },
+    vlm::MemeAnalysis,
 };
 use rusqlite::{Connection, params};
 use std::{collections::HashMap, path::Path, time::SystemTime};
@@ -16,7 +21,6 @@ use crate::{
     helpers::{
         embeding_helper::{blob_to_embedding, embedding_to_blob},
         hash_helper::hamming_distance,
-        lexical_helper::{count_lexical_matches, extract_stemmed_terms},
     },
 };
 
@@ -31,6 +35,7 @@ pub struct ReprocessCandidate {
     pub id: u64,
     pub file_tg_id: String,
     pub media_type: MediaType,
+    pub title: String,
 }
 
 impl MemeStore {
@@ -107,8 +112,8 @@ impl MemeStore {
             .unwrap_or_default()
             .as_secs();
 
-        self.conn
-            .execute(
+        let upserted_id: u64 = self.conn
+            .query_row(
                 "INSERT INTO memes (
                     id, title, ocr_text, description_uk, description_en,
                     embedding_uk, embedding_en,
@@ -128,7 +133,8 @@ impl MemeStore {
                     phash = excluded.phash,
                     media_type = excluded.media_type,
                     thumbnail_tg_id = excluded.thumbnail_tg_id,
-                    vlm_version = excluded.vlm_version;",
+                    vlm_version = excluded.vlm_version
+                RETURNING id (query_row);",
                 params![
                     new_meme.id,
                     new_meme.title,
@@ -146,6 +152,7 @@ impl MemeStore {
                     new_meme.thumbnail_tg_id,
                     new_meme.vlm_version
                 ],
+                |row| row.get(0)
             )
             .map_err(|e| e.to_string())?;
 
@@ -153,12 +160,12 @@ impl MemeStore {
             INSERT OR REPLACE INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
             VALUES (?, ?, ?, ?, ?)",
             params![
-                new_meme.user_id, new_meme.id, new_meme.title, is_public, now
+                new_meme.user_id, upserted_id, new_meme.title, is_public, now
             ]).map_err(|e| e.to_string())?;
 
         let meme = Meme {
-            id: new_meme.id,
-            title: new_meme.title,
+            id: upserted_id,
+            title: new_meme.title.clone(),
             ocr_text: new_meme.analysis.ocr_text.clone(),
             embedding_uk: embed_uk,
             embedding_en: embed_en,
@@ -182,6 +189,18 @@ impl MemeStore {
         } else {
             self.memes.push(meme);
         }
+
+        upsert_fts_entry(
+            &self.conn,
+            MemesFts::from_raw(
+                upserted_id,
+                &new_meme.analysis.ocr_text,
+                &new_meme.analysis.uk_description,
+                &new_meme.analysis.en_description,
+                &new_meme.title,
+            ),
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -279,6 +298,13 @@ impl MemeStore {
                 created_at BIGINT NOT NULL,
                 PRIMARY KEY (user_id, meme_id)
             );
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS memes_fts USING fts5 (
+                ocr_norm,
+                uk_norm,
+                en_norm,
+                title_norm
+            )
             ",
         )
         .map_err(|e| e.to_string())?;
@@ -686,7 +712,7 @@ impl MemeStore {
         let lim = limit.unwrap_or(500);
 
         let Ok(mut stmt) = self.conn.prepare(
-            "SELECT id, file_tg_id, media_type
+            "SELECT id, file_tg_id, media_type, title
                 FROM memes
                 WHERE vlm_version >= 0 AND vlm_version < ?
                 ORDER BY id
@@ -700,6 +726,7 @@ impl MemeStore {
                 id: row.get(0)?,
                 file_tg_id: row.get(1)?,
                 media_type: row.get(2).unwrap_or(MediaType::Photo),
+                title: row.get(3)?,
             })
         }) else {
             return Vec::new();
@@ -715,6 +742,7 @@ impl MemeStore {
         embed_uk: Vec<f32>,
         embed_en: Vec<f32>,
         vlm_version: i64,
+        title: &str,
     ) -> Result<(), String> {
         let blob_uk = embedding_to_blob(&embed_uk);
         let blob_en = embedding_to_blob(&embed_en);
@@ -746,6 +774,18 @@ impl MemeStore {
             meme.embedding_uk = embed_uk;
             meme.embedding_en = embed_en
         }
+
+        upsert_fts_entry(
+            &self.conn,
+            MemesFts::from_raw(
+                meme_id,
+                &analysis.ocr_text,
+                &analysis.uk_description,
+                &analysis.en_description,
+                title,
+            ),
+        )
+        .map_err(|e| e.to_string())?;
 
         Ok(())
     }
@@ -803,7 +843,7 @@ fn find_top_k<'a>(
 ) -> Vec<(&'a Meme, f32)> {
     let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(memes.len());
 
-    let query_terms = extract_stemmed_terms(query_text);
+    let query_terms = lexical_helper::extract_stemmed_terms(query_text);
     for meme in memes {
         let mut has_lexical_match = false;
         if !meme.is_visible_to(user_id, &scope_visible) {
@@ -821,7 +861,7 @@ fn find_top_k<'a>(
         let mut best_score = f32::max(sim_uk, sim_en);
 
         if !meme.ocr_text.is_empty() && !query_terms.is_empty() {
-            let matches = count_lexical_matches(&query_terms, &meme.ocr_text);
+            let matches = lexical_helper::count_lexical_matches(&query_terms, &meme.ocr_text);
             if matches > 0 {
                 let boost = 0.04 * (matches as f32 / query_terms.len() as f32);
                 best_score = (best_score + boost).min(1.0);

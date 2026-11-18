@@ -20,6 +20,48 @@ pub fn count_lexical_matches(query_terms: &[String], doc_text: &str) -> usize {
         .count()
 }
 
+pub fn normalize_for_fts(text: &str) -> String {
+    let tokens: Vec<String> = text
+        .to_lowercase()
+        .replace(['\'', '’', 'ʼ', '`'], "")
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.chars().count() >= 3 && !STOPWORDS.contains(t))
+        .map(light_stem)
+        .collect();
+
+    tokens.join(" ")
+}
+
+pub fn clean_title_for_fts(raw_title: &str) -> String {
+    let target = ["@", "http:", "https:", "t.me/"];
+
+    let tokens: String = raw_title
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|t| !target.iter().any(|prefix| t.starts_with(prefix)))
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    normalize_for_fts(&tokens)
+}
+
+pub fn build_fts_match_query(query: &str) -> Option<String> {
+    let terms = extract_stemmed_terms(query);
+
+    if terms.is_empty() {
+        return None;
+    }
+
+    let query = terms
+        .iter()
+        .map(|t| format!("\"{}\"", t))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    Some(query)
+}
+
 fn light_stem(token: &str) -> String {
     let chars: Vec<char> = token.chars().collect();
     if chars.len() <= 3 {

@@ -36,4 +36,12 @@ impl ClipEngine {
             .pop()
             .ok_or_else(|| "embedding query is empty".to_string())
     }
+
+    pub fn embed_passages_pair(
+        &mut self,
+        uk: &str,
+        en: &str,
+    ) -> Result<(Vec<f32>, Vec<f32>), String> {
+        Ok((self.embed_passage(uk)?, self.embed_passage(en)?))
+    }
 }

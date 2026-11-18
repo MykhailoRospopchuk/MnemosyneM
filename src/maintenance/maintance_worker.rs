@@ -196,9 +196,7 @@ async fn reprocess_vlm(
 
                 let embeds: Result<(Vec<f32>, Vec<f32>), String> = {
                     let mut engine = state.engine.lock().await;
-                    let uk_embed = engine.embed_passage(&passage_uk).unwrap();
-                    let en_embed = engine.embed_passage(&passage_en).unwrap();
-                    Ok((uk_embed, en_embed))
+                    engine.embed_passages_pair(&passage_uk, &passage_en)
                 };
 
                 let (embed_uk, embed_en) = match embeds {
@@ -217,6 +215,7 @@ async fn reprocess_vlm(
                         embed_uk,
                         embed_en,
                         CURRENT_VLM_VERSION,
+                        &item.title,
                     )
                 };
 
