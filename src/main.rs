@@ -7,6 +7,7 @@ mod helpers;
 mod maintenance;
 mod meme_store;
 mod migrations;
+mod reranker;
 mod vlm;
 mod worker;
 
@@ -20,6 +21,7 @@ use crate::{maintenance::maintance_worker, meme_store::MemeStore};
 struct AppState {
     meme_store: Mutex<MemeStore>,
     engine: Mutex<engine::ClipEngine>,
+    reranker: Option<Arc<std::sync::Mutex<reranker::RerankerEngine>>>,
     last_inline_query: Mutex<HashMap<i64, String>>,
 }
 
@@ -36,9 +38,30 @@ async fn main() {
     migrations::run(&app_config.db_path, &mut engine).expect("Failed to run migration");
     let store = MemeStore::open(&app_config.db_path).expect("Failed to open database");
 
+    let reranker = if app_config.enable_reranker {
+        println!("Loading Stage-2 reranker (BGERerankerV2M3)...");
+        match reranker::RerankerEngine::new() {
+            Ok(r) => {
+                println!("Stage-2 reranker loaded.");
+                Some(Arc::new(std::sync::Mutex::new(r)))
+            }
+            Err(e) => {
+                eprintln!(
+                    "[WARN] Failed to load Stage-2 reranker ({}); falling back to Phase 1A search.",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        println!("Stage-2 reranker disabled via ENABLE_RERANKER=false.");
+        None
+    };
+
     let state = Arc::new(AppState {
         meme_store: Mutex::new(store),
         engine: Mutex::new(engine),
+        reranker,
         last_inline_query: Mutex::new(HashMap::new()),
     });
 

@@ -588,9 +588,9 @@ Meme ID: 1793041234
     - [x] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
       - [x] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title` (closing the current gap where `count_lexical_matches` scans `ocr_text` only), kept in sync on inserts/updates.
       - [x] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
-    - [ ] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local or `gemini-decision-1`):**
-      - [ ] Evaluate local `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` vs `BGERerankerV2M3`) latency/RAM vs zero-RAM **`gemini-decision-1`** (`POST /v1beta/decisions`) batch scoring Top-15 Stage-1 candidates (`10K RPD / 200 RPM / 50K TPM`, 0 output tokens).
-      - [ ] Integrate Stage-2 reranker cleanly outside `meme_store` mutex (`tokio::task::spawn_blocking` for local ONNX or async `reqwest` for `Decision 1` on `/search` & borderline `weak_results`) + calibrated rejection threshold.
+    - [x] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local `BGERerankerV2M3`):**
+      - [x] Add `RerankerEngine` (`src/reranker.rs`) with `fastembed::TextRerank` (`BGERerankerV2M3`, `max_length=256`), `sigmoid(logit)` probability calibration, and `filter_reranked` noise/tail cutoff.
+      - [x] Integrate Stage-2 reranker cleanly outside `meme_store`/`engine` mutexes via `tokio::task::spawn_blocking` (`run_search` in `src/bot/handlers.rs`) with `ENABLE_RERANKER` / `RERANK_MIN_SCORE` / `RERANK_CANDIDATES` config and automatic fallback to Phase 1A.
     - [ ] **Phase 2 (Evaluation & Long-Term Scaling):**
       - [ ] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
       - [ ] Evaluate structured 3-vector blending (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.

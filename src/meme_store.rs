@@ -44,6 +44,11 @@ pub struct ReprocessCandidate {
     pub title: String,
 }
 
+pub struct Stage1Candidate {
+    pub meme: Meme,
+    pub passage: String,
+}
+
 struct FtsHit {
     bm25_score: f32,
     matched_terms: usize,
@@ -611,6 +616,125 @@ impl MemeStore {
         Ok(top_k)
     }
 
+    pub fn search_stage1_candidates(
+        &self,
+        query_text: &str,
+        engine: &mut ClipEngine,
+        app_config: &AppConfig,
+        user_id: i64,
+        media_filter: Option<MediaType>,
+        candidate_limit: usize,
+    ) -> Result<Vec<Stage1Candidate>, String> {
+        let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
+        let settings = self.get_user_settings(user_id);
+        Ok(self.stage1_candidates_from_embedding(
+            &embed,
+            query_text,
+            app_config,
+            user_id,
+            &settings.search_scope,
+            media_filter,
+            candidate_limit,
+        ))
+    }
+
+    pub fn stage1_candidates_from_embedding(
+        &self,
+        query: &[f32],
+        query_text: &str,
+        app_config: &AppConfig,
+        user_id: i64,
+        scope_visibility: &str,
+        media_filter: Option<MediaType>,
+        candidate_limit: usize,
+    ) -> Vec<Stage1Candidate> {
+        if candidate_limit == 0 {
+            return Vec::new();
+        }
+
+        let fts_hits = self.query_fts_hits(query_text, BM25_MATCH_LIMIT);
+        let scored = score_candidates(
+            query,
+            query_text,
+            &self.memes,
+            user_id,
+            scope_visibility,
+            media_filter,
+            &fts_hits,
+        );
+
+        let deduplicated =
+            deduplicate_by_phash(scored, candidate_limit, app_config.max_phash_distance);
+        let ids: Vec<u64> = deduplicated.iter().map(|s| s.meme.id).collect();
+        let passages = self.fetch_rerank_passages(&ids);
+
+        deduplicated
+            .into_iter()
+            .map(|s| {
+                let passage = passages
+                    .get(&s.meme.id)
+                    .cloned()
+                    .unwrap_or_else(|| s.meme.ocr_text.clone());
+                Stage1Candidate {
+                    meme: s.meme.clone(),
+                    passage,
+                }
+            })
+            .collect()
+    }
+
+    fn fetch_rerank_passages(&self, ids: &[u64]) -> HashMap<u64, String> {
+        if ids.is_empty() {
+            return HashMap::new();
+        }
+
+        let placeholders = vec!["?"; ids.len()].join(", ");
+        let sql = format!(
+            "SELECT id, ocr_text, description_uk, description_en FROM memes WHERE id IN ({})",
+            placeholders
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("[RERANK]-[WARN] Failed to prepare passage lookup: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        let rows = match stmt.query_map(rusqlite::params_from_iter(ids.iter()), |row| {
+            let id: u64 = row.get(0)?;
+            let ocr_text: String = row.get(1)?;
+            let desc_uk: String = row.get(2)?;
+            let desc_en: String = row.get(3)?;
+            let desc = if desc_uk.trim().is_empty() {
+                desc_en
+            } else {
+                desc_uk
+            };
+            Ok((id, format_embedding_passage(&ocr_text, &desc)))
+        }) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[RERANK]-[WARN] Failed to fetch rerank passages: {}", e);
+                return HashMap::new();
+            }
+        };
+
+        let mut passages = HashMap::with_capacity(ids.len());
+        for row in rows {
+            match row {
+                Ok((id, passage)) => {
+                    passages.insert(id, passage);
+                }
+                Err(e) => {
+                    eprintln!("[RERANK]-[WARN] Failed to map passage row: {}", e);
+                }
+            }
+        }
+        passages
+    }
+
     pub fn find_top_k(
         &self,
         query: &[f32],
@@ -647,7 +771,7 @@ impl MemeStore {
             }
 
             let distance = hamming_distance(meme.phash, target_phash);
-            if distance <= max_distance {
+            if distance < max_distance {
                 match best_match {
                     Some((_, best_dist)) if distance < best_dist => {
                         best_match = Some((meme.id, distance));
@@ -933,22 +1057,21 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
-fn find_top_k_impl<'a>(
+fn score_candidates<'a>(
     query: &[f32],
     query_text: &str,
     memes: &'a [Meme],
-    app_config: &AppConfig,
     user_id: i64,
-    scope_visible: String,
+    scope_visible: &str,
     media_filter: Option<MediaType>,
     fts_hits: &HashMap<u64, FtsHit>,
-) -> Vec<(&'a Meme, f32)> {
+) -> Vec<ScoredMeme<'a>> {
     let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(memes.len());
 
     let query_terms = lexical_helper::extract_stemmed_terms(query_text);
     for meme in memes {
         let mut has_lexical_match = false;
-        if !meme.is_visible_to(user_id, &scope_visible) {
+        if !meme.is_visible_to(user_id, scope_visible) {
             continue;
         };
 
@@ -962,22 +1085,22 @@ fn find_top_k_impl<'a>(
         let sim_en = cosine_similarity(query, &meme.embedding_en).unwrap_or(0.0);
         let mut best_score = f32::max(sim_uk, sim_en);
 
-        if !query_terms.is_empty() {
-            if let Some(fts) = fts_hits.get(&meme.id) {
-                if fts.matched_terms > 0 {
-                    let coverage = fts.matched_terms as f32 / query_terms.len() as f32;
-                    let norm_bm25 = fts.bm25_score / (fts.bm25_score + 10.0);
-                    let boost = 0.04 * coverage + 0.02 * norm_bm25;
-                    best_score = (best_score + boost).min(1.0);
-                    has_lexical_match = if query_terms.len() >= 3 {
-                        fts.matched_terms >= 2
-                    } else {
-                        fts.matched_terms >= 1
-                    };
-                }
-            }
+        let fts_hit = fts_hits.get(&meme.id);
+        if !query_terms.is_empty()
+            && let Some(fts) = fts_hit
+            && fts.matched_terms > 0
+        {
+            let coverage = fts.matched_terms as f32 / query_terms.len() as f32;
+            let norm_bm25 = fts.bm25_score / (fts.bm25_score + 10.0);
+            let boost = 0.04 * coverage + 0.02 * norm_bm25;
+            best_score = (best_score + boost).min(1.0);
+            has_lexical_match = if query_terms.len() >= 3 {
+                fts.matched_terms >= 2
+            } else {
+                fts.matched_terms >= 1
+            };
         }
-        if best_score > 0.5 {
+        if best_score > 0.5 || fts_hit.is_some() {
             selected_memes.push(ScoredMeme {
                 meme,
                 score: best_score,
@@ -986,6 +1109,28 @@ fn find_top_k_impl<'a>(
         }
     }
     selected_memes.sort_by(|b, a| a.score.total_cmp(&b.score));
+    selected_memes
+}
+
+fn find_top_k_impl<'a>(
+    query: &[f32],
+    query_text: &str,
+    memes: &'a [Meme],
+    app_config: &AppConfig,
+    user_id: i64,
+    scope_visible: String,
+    media_filter: Option<MediaType>,
+    fts_hits: &HashMap<u64, FtsHit>,
+) -> Vec<(&'a Meme, f32)> {
+    let selected_memes = score_candidates(
+        query,
+        query_text,
+        memes,
+        user_id,
+        &scope_visible,
+        media_filter,
+        fts_hits,
+    );
 
     let weak_filtered = weak_results(selected_memes);
 
@@ -1193,15 +1338,23 @@ mod tests {
         assert_eq!(weak_results(with_lex).len(), 20);
     }
 
-    #[test]
-    fn find_top_k_deduplicates_clones_and_avoids_false_substring_boost() {
-        let cfg = AppConfig {
+    fn make_test_config(top_k: usize) -> AppConfig {
+        AppConfig {
             db_path: String::new(),
-            top_k: 2,
+            top_k,
             gemini_api_key: String::new(),
             max_phash_distance: 5,
             auto_reprocess: false,
-        };
+            enable_reranker: false,
+            rerank_inline: false,
+            rerank_min_score: 0.005,
+            rerank_candidates: 10,
+        }
+    }
+
+    #[test]
+    fn find_top_k_deduplicates_clones_and_avoids_false_substring_boost() {
+        let cfg = make_test_config(2);
 
         let clone_a = make_test_meme(
             1,
@@ -1256,13 +1409,7 @@ mod tests {
 
     #[test]
     fn find_top_k_drops_distant_unmatched_tail() {
-        let cfg = AppConfig {
-            db_path: String::new(),
-            top_k: 3,
-            gemini_api_key: String::new(),
-            max_phash_distance: 5,
-            auto_reprocess: false,
-        };
+        let cfg = make_test_config(3);
 
         let exact = make_test_meme(1, 0x1000, "шоколадки", vec![1.0, 0.0]);
         let noise = make_test_meme(2, 0x2000, "випадковий текст", vec![0.8, 0.6]); // cos = 0.80, gap = 0.20 > 0.032
@@ -1346,13 +1493,7 @@ mod tests {
     #[test]
     fn fts_search_matches_description_uk_and_en_when_ocr_is_empty() {
         let mut store = MemeStore::open(":memory:").unwrap();
-        let cfg = AppConfig {
-            db_path: String::new(),
-            top_k: 3,
-            gemini_api_key: String::new(),
-            max_phash_distance: 5,
-            auto_reprocess: false,
-        };
+        let cfg = make_test_config(3);
 
         seed_memory_meme(
             &mut store,
@@ -1413,13 +1554,7 @@ mod tests {
 
     #[test]
     fn find_top_k_keeps_pure_vector_matches_without_fts_hits() {
-        let cfg = AppConfig {
-            db_path: String::new(),
-            top_k: 3,
-            gemini_api_key: String::new(),
-            max_phash_distance: 5,
-            auto_reprocess: false,
-        };
+        let cfg = make_test_config(3);
 
         let semantic_hit = make_test_meme(1, 0x1000, "", vec![0.95, 0.31]);
         let memes = vec![semantic_hit];
@@ -1439,5 +1574,52 @@ mod tests {
 
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].0.id, 1);
+    }
+
+    #[test]
+    fn stage1_candidates_fetches_full_passages_deduplicates_and_keeps_tail() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        let cfg = make_test_config(3);
+
+        seed_memory_meme(
+            &mut store,
+            1,
+            "мої повіки",
+            "Дитина піднімає штангу, важко прокидатись зранку",
+            "Kid lifting barbell",
+            "",
+            vec![1.0, 0.0],
+        );
+        // Distant vector score (gap > 0.032) that select_relative would drop,
+        // but Stage-1 must retain for the Cross-Encoder to evaluate.
+        seed_memory_meme(
+            &mut store,
+            2,
+            "",
+            "Кіт у паніці дивиться на годинник",
+            "Panicked cat looking at clock",
+            "",
+            vec![0.8, 0.6],
+        );
+
+        let query_vec = vec![1.0, 0.0];
+        let candidates = store.stage1_candidates_from_embedding(
+            &query_vec,
+            "важко вранці",
+            &cfg,
+            1,
+            "all",
+            None,
+            15,
+        );
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0].meme.id, 1);
+        assert_eq!(
+            candidates[0].passage,
+            "мої повіки | Дитина піднімає штангу, важко прокидатись зранку"
+        );
+        assert_eq!(candidates[1].meme.id, 2);
+        assert_eq!(candidates[1].passage, "Кіт у паніці дивиться на годинник");
     }
 }

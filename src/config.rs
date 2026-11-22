@@ -3,6 +3,8 @@ use std::sync::OnceLock;
 
 const TOP_K: usize = 3;
 const MAX_PHASH_DISTANCE: u32 = 5;
+const RERANK_MIN_SCORE: f32 = 0.005;
+const RERANK_CANDIDATES: usize = 10;
 
 pub struct AppConfig {
     pub db_path: String,
@@ -10,6 +12,10 @@ pub struct AppConfig {
     pub gemini_api_key: String,
     pub max_phash_distance: u32,
     pub auto_reprocess: bool,
+    pub enable_reranker: bool,
+    pub rerank_inline: bool,
+    pub rerank_min_score: f32,
+    pub rerank_candidates: usize,
 }
 
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -47,5 +53,25 @@ pub fn load_config() -> &'static AppConfig {
             .ok()
             .and_then(|v| v.parse::<bool>().ok())
             .unwrap_or(true),
+
+        enable_reranker: env::var("ENABLE_RERANKER")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(true),
+
+        rerank_inline: env::var("RERANK_INLINE")
+            .ok()
+            .and_then(|v| v.parse::<bool>().ok())
+            .unwrap_or(false),
+
+        rerank_min_score: env::var("RERANK_MIN_SCORE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(RERANK_MIN_SCORE),
+
+        rerank_candidates: env::var("RERANK_CANDIDATES")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(RERANK_CANDIDATES),
     })
 }

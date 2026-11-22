@@ -4,8 +4,10 @@ use crate::database::entity::media_type::MediaType;
 use crate::database::entity::meme::Meme;
 use crate::database::enums::book_mark_status_enum::BookMarkStatus;
 use crate::helpers::searsh_query_helper::parse_media_filter;
+use crate::reranker::filter_reranked;
 use crate::worker::MemeJob;
 use std::sync::Arc;
+use std::time::Instant;
 use teloxide::prelude::*;
 use teloxide::types::{
     Animation, FileId, InlineQueryResult, InlineQueryResultCachedMpeg4Gif,
@@ -152,6 +154,88 @@ pub async fn handle_animation(
     .await
 }
 
+async fn run_search(
+    state: &Arc<AppState>,
+    app_config: &AppConfig,
+    clean_query: &str,
+    user_id: i64,
+    media_filter: Option<MediaType>,
+    candidate_limit: usize,
+    use_reranker: bool,
+) -> Result<Vec<(Meme, f32)>, String> {
+    let reranker = if use_reranker {
+        state.reranker.as_ref().map(Arc::clone)
+    } else {
+        None
+    };
+
+    let Some(reranker) = reranker else {
+        let mut engine = state.engine.lock().await;
+        let meme_store = state.meme_store.lock().await;
+        let results = meme_store
+            .search_top_k(clean_query, &mut engine, app_config, user_id, media_filter)?
+            .into_iter()
+            .map(|(meme, score)| (meme.clone(), score))
+            .collect();
+        return Ok(results);
+    };
+
+    let candidates = {
+        let mut engine = state.engine.lock().await;
+        let meme_store = state.meme_store.lock().await;
+        meme_store.search_stage1_candidates(
+            clean_query,
+            &mut engine,
+            app_config,
+            user_id,
+            media_filter,
+            candidate_limit,
+        )?
+    };
+
+    if candidates.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let query_owned = clean_query.to_string();
+    let passages: Vec<String> = candidates.iter().map(|c| c.passage.clone()).collect();
+    let passage_count = passages.len();
+
+    let t0 = Instant::now();
+    let ranked = tokio::task::spawn_blocking(move || {
+        let mut guard = reranker
+            .lock()
+            .map_err(|_| "Reranker lock poisoned".to_string())?;
+        guard.rerank(&query_owned, &passages)
+    })
+    .await
+    .map_err(|e| format!("Reranker task panicked: {}", e))??;
+
+    let top3_debug: Vec<String> = ranked
+        .iter()
+        .take(3)
+        .filter_map(|&(idx, score)| {
+            candidates
+                .get(idx)
+                .map(|c| format!("id={}({:.4})", c.meme.id, score))
+        })
+        .collect();
+    println!(
+        "[RERANK] {} candidates scored in {:?} | top3: [{}]",
+        passage_count,
+        t0.elapsed(),
+        top3_debug.join(", ")
+    );
+
+    let filtered = filter_reranked(ranked, app_config.rerank_min_score, app_config.top_k);
+    let results = filtered
+        .into_iter()
+        .filter_map(|(idx, score)| candidates.get(idx).map(|c| (c.meme.clone(), score)))
+        .collect();
+
+    Ok(results)
+}
+
 pub async fn handle_search(
     bot: &Bot,
     msg: &Message,
@@ -176,22 +260,23 @@ pub async fn handle_search(
         text, media_filter
     );
 
-    let mut engine = state.engine.lock().await;
-    let meme_store = state.meme_store.lock().await;
-
-    match meme_store.search_top_k(
-        &clean_query,
-        &mut engine,
+    match run_search(
+        state,
         app_config,
+        &clean_query,
         msg.chat.id.0,
         media_filter,
-    ) {
+        app_config.rerank_candidates,
+        true,
+    )
+    .await
+    {
         Ok(results) if results.is_empty() => {
             bot.send_message(msg.chat.id, "There is nothing here...")
                 .await?;
         }
         Ok(results) => {
-            let valid_memes: Vec<(&Meme, f32)> = results
+            let valid_memes: Vec<(Meme, f32)> = results
                 .into_iter()
                 .filter(|(meme, _)| !meme.file_tg_id.is_empty())
                 .collect();
@@ -351,23 +436,28 @@ pub async fn handle_inline_query(
 
     println!("\n---- [INLINE_SEARCH] ---- User query: [{}]", clean_query);
 
-    let mut engine = state.engine.lock().await;
-    let meme_store = state.meme_store.lock().await;
-
-    let results =
-        match meme_store.search_top_k(&clean_query, &mut engine, app_config, user_id, media_filter)
-        {
-            Ok(matches) => matches
-                .into_iter()
-                .enumerate()
-                .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
-                .map(|(idx, (meme, score))| make_inline_result(idx, meme, score))
-                .collect(),
-            Err(e) => {
-                eprintln!("[ERROR] Inline search error: {}", e);
-                vec![]
-            }
-        };
+    let results = match run_search(
+        &state,
+        app_config,
+        &clean_query,
+        user_id,
+        media_filter,
+        app_config.rerank_candidates.min(8),
+        app_config.rerank_inline,
+    )
+    .await
+    {
+        Ok(matches) => matches
+            .into_iter()
+            .enumerate()
+            .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
+            .map(|(idx, (meme, score))| make_inline_result(idx, &meme, score))
+            .collect(),
+        Err(e) => {
+            eprintln!("[ERROR] Inline search error: {}", e);
+            vec![]
+        }
+    };
 
     if let Err(e) = bot
         .answer_inline_query(query.id, results)
