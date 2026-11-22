@@ -28,24 +28,24 @@ flowchart LR
 
 Вбудований токенізатор FTS5 (`unicode61`) не знає українських закінчень і не прибирає апострофи. Тому проганяємо текст при записі в індекс і при формуванні запиту через **одну й ту саму** нормалізацію.
 
-- [ ] **Додати `normalize_for_fts(text: &str) -> String`:**
+- [x] **Додати `normalize_for_fts(text: &str) -> String`:**
   - За аналогією з [`extract_stemmed_terms`](../src/helpers/lexical_helper.rs#L1-L13): lowercase, прибрати апострофи `['\'', '’', 'ʼ', '`']`, розбити по `!c.is_alphanumeric()`, відкинути `chars().count() < 3` та `STOPWORDS`, застосувати `light_stem`.
   - **Відмінність від `extract_stemmed_terms`:** **НЕ робити `.sort()` і `.dedup()`** — збереження повторів потрібне, щоб SQLite **BM25** правильно рахував частоту терма (`TF`), коли слово трапляється і в OCR, і в описі.
-- [ ] **Додати `clean_title_for_fts(raw_title: &str) -> String`:**
+- [x] **Додати `clean_title_for_fts(raw_title: &str) -> String`:**
   - У БД серед `652` непорожніх `title` більшість — підписи каналів (`💀TG | X | FB | Insta` — `246`, `@nepokazuy_mami` — `58`, `@yesterdays_deadline` — `35`, `LUM` — `53`, `Паштет` — `13`, `JustYourBBot`), інколи з корисним префіксом типу `Раночку\n💀TG | X | FB | Insta`.
   - По рядках відфільтрувати відомі канали/боти/підписи, прибрати `@username` та URL (`http://`, `https://`, `t.me/`), а залишок прогнати через `normalize_for_fts`.
-- [ ] **Додати `build_fts_match_query(query: &str) -> Option<String>`:**
+- [x] **Додати `build_fts_match_query(query: &str) -> Option<String>`:**
   - Витягнути `extract_stemmed_terms(query)` (унікальні терми, лише `alphanumeric`).
   - Якщо порожньо — повернути `None`.
   - Інакше сформувати безпечний `OR`-запит у лапках: `terms.iter().map(|t| format!("\"{}\"", t)).collect::<Vec<_>>().join(" OR ")`.
   - *Навіщо лапки й `OR`:* лапки гарантують, що слова на кшталт `not`/`and` або спецсимволи ніколи не викличуть `fts5: syntax error`; `OR` не обнуляє результат, якщо з 5 слів запиту в мема збіглися 3–4 (BM25 сам підніме вище тих, де збіглося більше).
-- [ ] Покрити 3 функціями юніт-тестів прямо в `lexical_helper.rs`.
+- [x] Покрити 3 функціями юніт-тестів прямо в `lexical_helper.rs`.
 
 ---
 
 ## Крок 2. Таблиця `memes_fts` та міграція ([`src/migrations.rs`](../src/migrations.rs), [`src/meme_store.rs`](../src/meme_store.rs))
 
-- [ ] **DDL таблиці (`memes_fts`):**
+- [x] **DDL таблиці (`memes_fts`):**
   У [`MemeStore::open`](../src/meme_store.rs#L244-L275) та у міграції створити віртуальну таблицю з окремими колонками під ваги BM25 (`rowid` буде прямо дорівнювати `memes.id`):
   ```sql
   CREATE VIRTUAL TABLE IF NOT EXISTS memes_fts USING fts5(
@@ -55,7 +55,7 @@ flowchart LR
       title_norm
   );
   ```
-- [ ] **Міграція `add_memes_fts_index` у [`src/migrations.rs`](../src/migrations.rs):**
+- [x] **Міграція `add_memes_fts_index` у [`src/migrations.rs`](../src/migrations.rs):**
   - За прикладом попередніх міграцій (з записом у `_migrations`):
     1. Створити `memes_fts`.
     2. Почистити/заповнити в одній транзакції: прочитати `(id, ocr_text, description_uk, description_en, title)` з `memes` і виконати:
@@ -64,7 +64,7 @@ flowchart LR
        VALUES (?, ?, ?, ?, ?);
        ```
        (через `DELETE FROM memes_fts` перед заповненням або `INSERT OR REPLACE` по `rowid`).
-- [ ] **Спільний helper `upsert_fts_entry(conn: &Connection, ...)` у [`src/meme_store.rs`](../src/meme_store.rs):**
+- [x] **Спільний helper `upsert_fts_entry(conn: &Connection, ...)` у [`src/meme_store.rs`](../src/meme_store.rs):**
   - Робить `DELETE FROM memes_fts WHERE rowid = ?` + `INSERT INTO memes_fts(rowid, ocr_norm, uk_norm, en_norm, title_norm) VALUES (?, ?, ?, ?, ?)`.
   - Викликати в:
     1. [`add_from_analysis`](../src/meme_store.rs#L81-L181): **важливий нюанс!** Якщо спрацював `ON CONFLICT (file_tg_unique_id) DO UPDATE`, в таблиці `memes` залишається старий `id` (а не `new_meme.id`), тому для `upsert_fts_entry` (і оновлення `self.memes`) краще забрати фактичний `id` через `RETURNING id` (`query_row`) або `SELECT id FROM memes WHERE file_tg_unique_id = ?`.
@@ -74,7 +74,7 @@ flowchart LR
 
 ## Крок 3. Пошук `Top-K` через FTS5 + Vector ([`src/meme_store.rs`](../src/meme_store.rs))
 
-- [ ] **Метод вибірки лексичних кандидатів на `MemeStore`:**
+- [x] **Метод вибірки лексичних кандидатів на `MemeStore`:**
   ```rust
   struct FtsHit {
       bm25_score: f32,
@@ -97,7 +97,7 @@ flowchart LR
      > У SQLite FTS5 `bm25(...)` повертає **від'ємні значення** (чим менше число, наприклад `-14.5`, тим кращий збіг). Тому у SQL **завжди `ORDER BY raw_bm25 ASC`**, а в Rust беремо `let bm25_score = (-raw_bm25 as f32).max(0.0);`!
   3. Для кожного повернутого рядка порахувати `matched_terms` — скільки термів із `query_terms` трапляються в об'єднаному нормалізованому тексті `(ocr_norm, uk_norm, en_norm, title_norm)` (унікальних по запиту).
 
-- [ ] **Оновити [`find_top_k`](../src/meme_store.rs#L798-L853):**
+- [x] **Оновити [`find_top_k`](../src/meme_store.rs#L798-L853):**
   1. У [`MemeStore::find_top_k`](../src/meme_store.rs#L568-L586) викликати `let fts_hits = self.query_fts_hits(query_text, 40);` і передати `&fts_hits` у внутрішню чисту `find_top_k(...)`.
   2. Всередині циклу по `memes` прибрати ре-токенізацію `count_lexical_matches(&query_terms, &meme.ocr_text)`:
      - Дивимось у `fts_hits.get(&meme.id)`:
@@ -112,13 +112,13 @@ flowchart LR
 
 ## Крок 4. Тести та перевірка
 
-- [ ] Оновити існуючі тести `find_top_k` (передати `&HashMap::new()` або тестову `fts_hits` мапу).
-- [ ] Додати інтеграційні тести на `MemeStore::open(":memory:")`:
+- [x] Оновити існуючі тести `find_top_k` (передати `&HashMap::new()` або тестову `fts_hits` мапу).
+- [x] Додати інтеграційні тести на `MemeStore::open(":memory:")`:
   1. Запит знаходить мем за словами з `description_uk` та `description_en`, навіть коли `ocr_text` порожній і вектори однакові.
   2. Спам із `title` на кшталт `"💀TG | X | FB | Insta"` та `"@nepokazuy_mami"` ігнорується, а корисна частина `"Раночку\n💀TG | X | FB | Insta"` знаходиться по `"ранок"`/`"раночку"`.
   3. Спецсимволи та оператори (`"що це? C++ (NOT) *test*"`) у запиті не ламають `MATCH`.
   4. `update_meme_reprocessed` оновлює `memes_fts` (старі слова більше не знаходяться, нові знаходяться).
-- [ ] Прогнати `cargo test && cargo clippy --all-targets`.
+- [x] Прогнати `cargo test && cargo clippy --all-targets`.
 
 ---
 

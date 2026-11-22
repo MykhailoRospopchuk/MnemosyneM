@@ -8,8 +8,8 @@ use serde_json::json;
 use crate::database::enums::vlm_error_enum::VlmError;
 
 const GEMINNI_MODEL_POOL: &[&str] = &[
-    "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3.6-flash",
     "gemini-3.8-flash",
 ];

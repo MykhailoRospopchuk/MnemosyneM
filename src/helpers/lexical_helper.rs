@@ -12,14 +12,6 @@ pub fn extract_stemmed_terms(text: &str) -> Vec<String> {
     tokens
 }
 
-pub fn count_lexical_matches(query_terms: &[String], doc_text: &str) -> usize {
-    let doc_terms = extract_stemmed_terms(doc_text);
-    query_terms
-        .iter()
-        .filter(|q| doc_terms.iter().any(|d| d == *q))
-        .count()
-}
-
 pub fn normalize_for_fts(text: &str) -> String {
     let tokens: Vec<String> = text
         .to_lowercase()
@@ -195,17 +187,27 @@ mod lexical_helper_tests {
     }
 
     #[test]
-    fn count_lexical_matches_test() {
-        let tokens = extract_stemmed_terms("шоколадки на касі");
+    fn normalize_for_fts_preserves_term_frequency_and_stems() {
+        let normalized = normalize_for_fts("шоколадки на касі, шоколадки!");
+        assert_eq!(normalized, "шоколадк кас шоколадк");
 
-        assert_eq!(count_lexical_matches(&tokens, "Свінабони"), 0);
-        assert_eq!(count_lexical_matches(&tokens, "оплата частинами"), 0);
+        assert_eq!(normalize_for_fts("Я ВНОЧІ: 02:00"), "вноч");
+    }
+
+    #[test]
+    fn clean_title_for_fts_strips_mentions_and_urls() {
         assert_eq!(
-            count_lexical_matches(&tokens, "* Left side: шоколадки на касах"),
-            2
+            clean_title_for_fts("Раночку @nepokazuy_mami https://t.me/test"),
+            "раночк"
         );
+        assert_eq!(clean_title_for_fts("@yesterdays_deadline t.me/abc"), "");
+    }
 
-        let tokens = extract_stemmed_terms("важко вранці відкрити очі");
-        assert_eq!(count_lexical_matches(&tokens, "Я ВНОЧІ: 02:00"), 0);
+    #[test]
+    fn build_fts_match_query_quotes_terms_and_handles_empty() {
+        assert_eq!(build_fts_match_query("на і до ???"), None);
+
+        let q = build_fts_match_query("що це? C++ (NOT) *шоколадки* на касі").unwrap();
+        assert_eq!(q, "\"кас\" OR \"шоколадк\"");
     }
 }

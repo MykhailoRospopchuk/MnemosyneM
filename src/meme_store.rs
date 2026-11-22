@@ -7,7 +7,11 @@ use crate::{
     vlm::MemeAnalysis,
 };
 use rusqlite::{Connection, params};
-use std::{collections::HashMap, path::Path, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    time::SystemTime,
+};
 
 use crate::{
     database::{
@@ -24,6 +28,8 @@ use crate::{
     },
 };
 
+const BM25_MATCH_LIMIT: usize = 40;
+
 #[derive(Debug)]
 pub struct MemeStore {
     conn: Connection,
@@ -36,6 +42,20 @@ pub struct ReprocessCandidate {
     pub file_tg_id: String,
     pub media_type: MediaType,
     pub title: String,
+}
+
+struct FtsHit {
+    bm25_score: f32,
+    matched_terms: usize,
+}
+
+struct Fts35 {
+    rowid: u64,
+    ocr_norm: String,
+    uk_norm: String,
+    en_norm: String,
+    title_norm: String,
+    bm25_score: f32,
 }
 
 impl MemeStore {
@@ -134,7 +154,7 @@ impl MemeStore {
                     media_type = excluded.media_type,
                     thumbnail_tg_id = excluded.thumbnail_tg_id,
                     vlm_version = excluded.vlm_version
-                RETURNING id (query_row);",
+                RETURNING id;",
                 params![
                     new_meme.id,
                     new_meme.title,
@@ -600,7 +620,9 @@ impl MemeStore {
         scope_visibility: String,
         media_filter: Option<MediaType>,
     ) -> Vec<(&Meme, f32)> {
-        find_top_k(
+        let fts_hits = self.query_fts_hits(query_text, BM25_MATCH_LIMIT);
+
+        find_top_k_impl(
             query,
             query_text,
             &self.memes,
@@ -608,6 +630,7 @@ impl MemeStore {
             user_id,
             scope_visibility,
             media_filter,
+            &fts_hits,
         )
     }
 
@@ -812,6 +835,84 @@ impl MemeStore {
 
         Ok(())
     }
+
+    fn query_fts_hits(&self, query_text: &str, limit: usize) -> HashMap<u64, FtsHit> {
+        let query_terms = lexical_helper::extract_stemmed_terms(query_text);
+
+        match lexical_helper::build_fts_match_query(query_text) {
+            Some(match_expresion) => {
+                let mut stmt = match self.conn.prepare(
+                    "
+                    SELECT rowid,
+                           bm25(memes_fts, 2.0, 1.0, 0.6, 0.8) as raw_bm25,
+                           ocr_norm,
+                           uk_norm,
+                           en_norm,
+                           title_norm
+                    FROM memes_fts
+                    WHERE memes_fts MATCH ?
+                    ORDER BY raw_bm25 ASC
+                    LIMIT ?;",
+                ) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("[FTS]-[ERROR] Failed to prepare FTS query: {}", e);
+                        return HashMap::new();
+                    }
+                };
+
+                let match_rows = match stmt.query_map(params![match_expresion, limit], |row| {
+                    let raw_bm25: f32 = row.get(1)?;
+                    Ok(Fts35 {
+                        rowid: row.get(0)?,
+                        ocr_norm: row.get(2)?,
+                        uk_norm: row.get(3)?,
+                        en_norm: row.get(4)?,
+                        title_norm: row.get(5)?,
+                        bm25_score: (-raw_bm25 as f32).max(0.0),
+                    })
+                }) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        eprintln!("[FTS]-[ERROR] Failed to mapp FTS rpw: {}", e);
+                        return HashMap::new();
+                    }
+                };
+
+                let mut result: HashMap<u64, FtsHit> = HashMap::new();
+                for matched_result in match_rows {
+                    match matched_result {
+                        Ok(matched) => {
+                            let doc_tokens: HashSet<&str> = matched
+                                .ocr_norm
+                                .split_whitespace()
+                                .chain(matched.uk_norm.split_whitespace())
+                                .chain(matched.en_norm.split_whitespace())
+                                .chain(matched.title_norm.split_whitespace())
+                                .collect();
+                            let matched_terms = query_terms
+                                .iter()
+                                .filter(|q| doc_tokens.contains(q.as_str()))
+                                .count();
+
+                            result.insert(
+                                matched.rowid,
+                                FtsHit {
+                                    bm25_score: matched.bm25_score,
+                                    matched_terms,
+                                },
+                            );
+                        }
+                        Err(e) => eprintln!("[FTS]-[WARN] Failed t omap FTS row: {}", e),
+                    }
+                }
+                drop(stmt);
+
+                return result;
+            }
+            None => return HashMap::new(),
+        };
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
@@ -832,7 +933,7 @@ fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
     Ok(dot_product / (sqrt_sq_a.sqrt() * sqrt_sq_b.sqrt()))
 }
 
-fn find_top_k<'a>(
+fn find_top_k_impl<'a>(
     query: &[f32],
     query_text: &str,
     memes: &'a [Meme],
@@ -840,6 +941,7 @@ fn find_top_k<'a>(
     user_id: i64,
     scope_visible: String,
     media_filter: Option<MediaType>,
+    fts_hits: &HashMap<u64, FtsHit>,
 ) -> Vec<(&'a Meme, f32)> {
     let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(memes.len());
 
@@ -860,12 +962,19 @@ fn find_top_k<'a>(
         let sim_en = cosine_similarity(query, &meme.embedding_en).unwrap_or(0.0);
         let mut best_score = f32::max(sim_uk, sim_en);
 
-        if !meme.ocr_text.is_empty() && !query_terms.is_empty() {
-            let matches = lexical_helper::count_lexical_matches(&query_terms, &meme.ocr_text);
-            if matches > 0 {
-                let boost = 0.04 * (matches as f32 / query_terms.len() as f32);
-                best_score = (best_score + boost).min(1.0);
-                has_lexical_match = true;
+        if !query_terms.is_empty() {
+            if let Some(fts) = fts_hits.get(&meme.id) {
+                if fts.matched_terms > 0 {
+                    let coverage = fts.matched_terms as f32 / query_terms.len() as f32;
+                    let norm_bm25 = fts.bm25_score / (fts.bm25_score + 10.0);
+                    let boost = 0.04 * coverage + 0.02 * norm_bm25;
+                    best_score = (best_score + boost).min(1.0);
+                    has_lexical_match = if query_terms.len() >= 3 {
+                        fts.matched_terms >= 2
+                    } else {
+                        fts.matched_terms >= 1
+                    };
+                }
             }
         }
         if best_score > 0.5 {
@@ -1111,8 +1220,23 @@ mod tests {
 
         let memes = vec![clone_a, clone_b, svinabony];
         let query_vec = vec![0.9, 0.1];
+        let mut fts_hits = HashMap::new();
+        fts_hits.insert(
+            1,
+            FtsHit {
+                bm25_score: 8.5,
+                matched_terms: 2,
+            },
+        );
+        fts_hits.insert(
+            2,
+            FtsHit {
+                bm25_score: 8.5,
+                matched_terms: 2,
+            },
+        );
 
-        let results = find_top_k(
+        let results = find_top_k_impl(
             &query_vec,
             "шоколадки на касі",
             &memes,
@@ -1120,6 +1244,7 @@ mod tests {
             1,
             "all".to_string(),
             None,
+            &fts_hits,
         );
 
         let ids: Vec<u64> = results.iter().map(|(m, _)| m.id).collect();
@@ -1144,8 +1269,16 @@ mod tests {
 
         let memes = vec![exact, noise];
         let query_vec = vec![1.0, 0.0];
+        let mut fts_hits = HashMap::new();
+        fts_hits.insert(
+            1,
+            FtsHit {
+                bm25_score: 6.0,
+                matched_terms: 1,
+            },
+        );
 
-        let results = find_top_k(
+        let results = find_top_k_impl(
             &query_vec,
             "шоколадки",
             &memes,
@@ -1153,9 +1286,158 @@ mod tests {
             1,
             "all".to_string(),
             None,
+            &fts_hits,
         );
 
         let ids: Vec<u64> = results.iter().map(|(m, _)| m.id).collect();
         assert_eq!(ids, vec![1]);
+    }
+
+    fn seed_memory_meme(
+        store: &mut MemeStore,
+        id: u64,
+        ocr: &str,
+        desc_uk: &str,
+        desc_en: &str,
+        title: &str,
+        embedding_uk: Vec<f32>,
+    ) {
+        let blob_uk = embedding_to_blob(&embedding_uk);
+        let blob_en = embedding_to_blob(&[0.0, 1.0]);
+        store
+            .conn
+            .execute(
+                "INSERT INTO memes (
+                    id, title, ocr_text, description_uk, description_en,
+                    embedding_uk, embedding_en, file_tg_id, file_tg_unique_id,
+                    source_title, source_url, phash, media_type, thumbnail_tg_id, vlm_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', '', ?, 0, '', 2)",
+                params![
+                    id,
+                    title,
+                    ocr,
+                    desc_uk,
+                    desc_en,
+                    blob_uk,
+                    blob_en,
+                    format!("tg_{}", id),
+                    format!("uniq_{}", id),
+                    id as i64
+                ],
+            )
+            .unwrap();
+
+        upsert_fts_entry(
+            &store.conn,
+            MemesFts::from_raw(id, ocr, desc_uk, desc_en, title),
+        )
+        .unwrap();
+
+        let mut meme = make_test_meme(
+            id,
+            id.wrapping_mul(0x0101_0101_0101_0101),
+            ocr,
+            embedding_uk,
+        );
+        meme.title = title.to_string();
+        store.memes.push(meme);
+    }
+
+    #[test]
+    fn fts_search_matches_description_uk_and_en_when_ocr_is_empty() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        let cfg = AppConfig {
+            db_path: String::new(),
+            top_k: 3,
+            gemini_api_key: String::new(),
+            max_phash_distance: 5,
+            auto_reprocess: false,
+        };
+
+        seed_memory_meme(
+            &mut store,
+            1,
+            "",
+            "Кіт у паніці дивиться на монітор через дедлайн",
+            "Panicked cat staring at monitor",
+            "Раночку @nepokazuy_mami",
+            vec![0.9, 0.436],
+        );
+        seed_memory_meme(
+            &mut store,
+            2,
+            "",
+            "Пес спить на дивані ввечері",
+            "Dog sleeping on couch",
+            "",
+            vec![0.91, 0.415],
+        );
+
+        let query_vec = vec![1.0, 0.0];
+        let results = store.find_top_k(&query_vec, "кіт дедлайн", &cfg, 1, "all".to_string(), None);
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].0.id, 1);
+        assert!(results[0].1 > 0.93);
+    }
+
+    #[test]
+    fn fts_query_handles_special_chars_and_update_meme_reprocessed_syncs_index() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(
+            &mut store,
+            10,
+            "старий текст",
+            "старий опис про чайник",
+            "old kettle description",
+            "",
+            vec![1.0, 0.0],
+        );
+
+        let special_hits = store.query_fts_hits("що це? C++ (NOT) *чайник*", 10);
+        assert!(special_hits.contains_key(&10));
+
+        let updated = MemeAnalysis {
+            is_nsfw: false,
+            ocr_text: "новий текст".to_string(),
+            uk_description: "свіжий опис про кавоварку".to_string(),
+            en_description: "fresh coffee machine".to_string(),
+        };
+        store
+            .update_meme_reprocessed(10, &updated, vec![1.0, 0.0], vec![0.0, 1.0], 2, "")
+            .unwrap();
+
+        assert!(!store.query_fts_hits("чайник", 10).contains_key(&10));
+        assert!(store.query_fts_hits("кавоварка", 10).contains_key(&10));
+    }
+
+    #[test]
+    fn find_top_k_keeps_pure_vector_matches_without_fts_hits() {
+        let cfg = AppConfig {
+            db_path: String::new(),
+            top_k: 3,
+            gemini_api_key: String::new(),
+            max_phash_distance: 5,
+            auto_reprocess: false,
+        };
+
+        let semantic_hit = make_test_meme(1, 0x1000, "", vec![0.95, 0.31]);
+        let memes = vec![semantic_hit];
+        let query_vec = vec![0.95, 0.31];
+        let empty_fts = HashMap::new();
+
+        let results = find_top_k_impl(
+            &query_vec,
+            "абстрактний синонім",
+            &memes,
+            &cfg,
+            1,
+            "all".to_string(),
+            None,
+            &empty_fts,
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].0.id, 1);
     }
 }

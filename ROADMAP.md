@@ -585,9 +585,9 @@ Meme ID: 1793041234
       - [x] Search-time `phash` deduplication in `find_top_k` (`MAX_PHASH_DISTANCE`) so clone memes never occupy multiple `TOP_K` slots.
       - [x] Replace `best_score > 0.05` with relative score-gap cutoff (`select_relative` + `weak_results`, min floor `0.5`). *(Follow-up: cover `<20`-candidate scopes like `private_only`.)*
       - [x] Refactor VLM prompt & post-sanitizer (`src/vlm.rs`), plus `vlm_version=2` migration & background `reprocess_vlm` (`maintance_worker.rs` — already migrated 621 rows, cutting avg words `64.4 -> 44.2` and eliminating 72% `v1` English-in-`description_uk` leaks).
-    - [ ] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
-      - [ ] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title` (closing the current gap where `count_lexical_matches` scans `ocr_text` only), kept in sync on inserts/updates.
-      - [ ] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
+    - [x] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
+      - [x] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title` (closing the current gap where `count_lexical_matches` scans `ocr_text` only), kept in sync on inserts/updates.
+      - [x] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
     - [ ] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local or `gemini-decision-1`):**
       - [ ] Evaluate local `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual` vs `BGERerankerV2M3`) latency/RAM vs zero-RAM **`gemini-decision-1`** (`POST /v1beta/decisions`) batch scoring Top-15 Stage-1 candidates (`10K RPD / 200 RPM / 50K TPM`, 0 output tokens).
       - [ ] Integrate Stage-2 reranker cleanly outside `meme_store` mutex (`tokio::task::spawn_blocking` for local ONNX or async `reqwest` for `Decision 1` on `/search` & borderline `weak_results`) + calibrated rejection threshold.
