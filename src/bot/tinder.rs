@@ -4,7 +4,7 @@ use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::{
     FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, InputMedia,
-    InputMediaAnimation, InputMediaPhoto, Message,
+    InputMediaAnimation, InputMediaPhoto, Message, ParseMode,
 };
 
 use crate::AppState;
@@ -12,23 +12,69 @@ use crate::database::entity::media_type::MediaType;
 use crate::database::entity::meme::Meme;
 use tracing::{error, warn};
 
-fn format_source_line(meme: &Meme) -> String {
-    if meme.source_url.is_empty() {
-        String::new()
-    } else if meme.source_title.is_empty() {
-        format!("\n📎 ({})", meme.source_url)
+const MAX_SOURCE_TITLE_CHARS: usize = 45;
+
+pub(crate) fn escape_html(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn truncate_title(title: &str, max_chars: usize) -> String {
+    let trimmed = title.trim();
+    let mut chars = trimmed.chars();
+    let prefix: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{}…", prefix)
     } else {
-        format!("\n📎 [{}] ({})", meme.source_title, meme.source_url)
+        prefix
+    }
+}
+
+pub(crate) fn format_source_html(meme: &Meme) -> String {
+    let url = meme.source_url.trim();
+    if url.is_empty() {
+        return String::new();
+    }
+    let title = meme.source_title.trim();
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let label = if title.is_empty() {
+            "джерело".to_string()
+        } else {
+            truncate_title(title, MAX_SOURCE_TITLE_CHARS)
+        };
+        format!(
+            " · 📎 <a href=\"{}\">{}</a>",
+            escape_html(url),
+            escape_html(&label)
+        )
+    } else {
+        let fallback = if title.is_empty() { url } else { title };
+        format!(" · 📎 {}", escape_html(fallback))
     }
 }
 
 fn build_input_media(meme: &Meme, caption: String) -> InputMedia {
     let file = InputFile::file_id(FileId(meme.file_tg_id.clone()));
     match meme.media_type {
-        MediaType::Photo => InputMedia::Photo(InputMediaPhoto::new(file).caption(caption)),
-        MediaType::Animation => {
-            InputMedia::Animation(InputMediaAnimation::new(file).caption(caption))
-        }
+        MediaType::Photo => InputMedia::Photo(
+            InputMediaPhoto::new(file)
+                .caption(caption)
+                .parse_mode(ParseMode::Html),
+        ),
+        MediaType::Animation => InputMedia::Animation(
+            InputMediaAnimation::new(file)
+                .caption(caption)
+                .parse_mode(ParseMode::Html),
+        ),
     }
 }
 
@@ -44,12 +90,14 @@ async fn send_meme_with_markup(
         MediaType::Photo => {
             bot.send_photo(chat_id, file)
                 .caption(caption)
+                .parse_mode(ParseMode::Html)
                 .reply_markup(keyboard)
                 .await
         }
         MediaType::Animation => {
             bot.send_animation(chat_id, file)
                 .caption(caption)
+                .parse_mode(ParseMode::Html)
                 .reply_markup(keyboard)
                 .await
         }
@@ -57,11 +105,7 @@ async fn send_meme_with_markup(
 }
 
 fn tinder_caption(meme: &Meme, remaining: usize) -> String {
-    format!(
-        "🔥 Мем-Тіндер | Залишилось: {}{}",
-        remaining,
-        format_source_line(meme)
-    )
+    format!("🔥 Тіндер · {}{}", remaining, format_source_html(meme))
 }
 
 fn tinder_keyboard(meme_id: u64) -> InlineKeyboardMarkup {
@@ -80,12 +124,7 @@ fn reset_skips_keyboard() -> InlineKeyboardMarkup {
 }
 
 fn liked_caption(meme: &Meme, idx: usize, total: usize) -> String {
-    format!(
-        "❤️ Вподобані ({}/{}){}",
-        idx + 1,
-        total,
-        format_source_line(meme)
-    )
+    format!("❤️ {}/{}{}", idx + 1, total, format_source_html(meme))
 }
 
 fn liked_keyboard(meme: &Meme, user_id: i64, idx: usize, total: usize) -> InlineKeyboardMarkup {
@@ -215,11 +254,7 @@ pub async fn handle_tinder_callback(
             store.get_next_tinder_meme(user_id)
         };
 
-        if let Err(e) = bot
-            .answer_callback_query(callback_id)
-            .text("🔄 Скіпи скинуто!")
-            .await
-        {
+        if let Err(e) = bot.answer_callback_query(callback_id).await {
             warn!(user_id, error = %e, "Failed to answer tinder reset_skips callback");
         }
 
@@ -298,12 +333,7 @@ pub async fn handle_tinder_callback(
         (next, skips)
     };
 
-    let toast = match action {
-        "like" => "❤️ Додано у /liked",
-        "dislike" => "👎 Приховано",
-        _ => "⏭️ Пропущено",
-    };
-    if let Err(e) = bot.answer_callback_query(callback_id).text(toast).await {
+    if let Err(e) = bot.answer_callback_query(callback_id).await {
         warn!(user_id, meme_id, error = %e, "Failed to answer tinder callback query");
     }
 
@@ -465,10 +495,7 @@ pub async fn handle_liked_callback(
                 store.get_liked_memes(user_id)
             };
 
-            let _ = bot
-                .answer_callback_query(callback_id)
-                .text("💔 Прибрано з вподобаних")
-                .await;
+            let _ = bot.answer_callback_query(callback_id).await;
 
             if let Some(msg) = callback_query.regular_message() {
                 if liked.is_empty() {
@@ -503,4 +530,77 @@ pub async fn handle_liked_callback(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_meme(source_title: &str, source_url: &str) -> Meme {
+        Meme {
+            id: 1,
+            title: String::new(),
+            ocr_text: String::new(),
+            embedding_uk: Vec::new(),
+            embedding_en: Vec::new(),
+            file_tg_id: "tg1".to_string(),
+            file_tg_unique_id: "u1".to_string(),
+            source_title: source_title.to_string(),
+            source_url: source_url.to_string(),
+            is_public: true,
+            owners: Vec::new(),
+            phash: 0,
+            media_type: MediaType::Photo,
+            thumbnail_tg_id: String::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn format_source_html_escapes_and_handles_missing_title_or_url() {
+        assert_eq!(format_source_html(&sample_meme("WTF", "")), "");
+        assert_eq!(
+            format_source_html(&sample_meme("", "https://t.me/WTF_UKR/4036")),
+            " · 📎 <a href=\"https://t.me/WTF_UKR/4036\">джерело</a>"
+        );
+        assert_eq!(
+            format_source_html(&sample_meme(
+                "WTF | <script> & \"IT\"",
+                "https://t.me/WTF_UKR/1?a=1&b=2"
+            )),
+            " · 📎 <a href=\"https://t.me/WTF_UKR/1?a=1&amp;b=2\">WTF | &lt;script&gt; &amp; &quot;IT&quot;</a>"
+        );
+    }
+
+    #[test]
+    fn format_source_html_truncates_unicode_title_and_avoids_anchor_for_non_http() {
+        let long_uk = "Дуже довга назва українського телеграм каналу з купою слів";
+        let html = format_source_html(&sample_meme(long_uk, "https://t.me/ch/1"));
+        assert!(html.contains("…</a>"));
+        let start = html.find("\">").unwrap() + 2;
+        let end = html.find("</a>").unwrap();
+        assert!(html[start..end].chars().count() <= MAX_SOURCE_TITLE_CHARS + 1);
+
+        let non_http = format_source_html(&sample_meme("Локальний <чат>", "tg://resolve?domain=x"));
+        assert_eq!(non_http, " · 📎 Локальний &lt;чат&gt;");
+        assert!(!non_http.contains("<a "));
+    }
+
+    #[test]
+    fn compact_tinder_and_liked_captions_stay_single_line() {
+        let meme = sample_meme("WTF | новини IT | меми", "https://t.me/WTF_UKR/4036");
+        let tc = tinder_caption(&meme, 1544);
+        assert_eq!(
+            tc,
+            "🔥 Тіндер · 1544 · 📎 <a href=\"https://t.me/WTF_UKR/4036\">WTF | новини IT | меми</a>"
+        );
+        assert!(!tc.contains('\n'));
+
+        let lc = liked_caption(&meme, 2, 10);
+        assert_eq!(
+            lc,
+            "❤️ 3/10 · 📎 <a href=\"https://t.me/WTF_UKR/4036\">WTF | новини IT | меми</a>"
+        );
+        assert!(!lc.contains('\n'));
+    }
 }

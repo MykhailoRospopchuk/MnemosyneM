@@ -23,13 +23,28 @@ use crate::database::enums::command_enum::Command;
 use crate::meme_store::UserReactionCounts;
 use crate::worker::MemeJob;
 
-pub const BTN_TINDER: &str = "🔥 Мем-Тіндер";
-pub const BTN_LIKED: &str = "❤️ Вподобані";
+pub const BTN_TINDER: &str = "🔥 Тіндер";
+pub const BTN_LIKED: &str = "❤️ Лайки";
+pub const BTN_TAGS: &str = "🏷️ Теги";
 pub const BTN_DRIP: &str = "🎁 Підписка";
-pub const BTN_RANDOM: &str = "🎲 Випадковий мем";
-pub const BTN_STATS: &str = "📊 Статистика";
-pub const BTN_SETTINGS: &str = "⚙️ Налаштування";
-pub const BTN_HELP: &str = "❓ Допомога";
+pub const BTN_RANDOM: &str = "🎲 Рандом";
+pub const BTN_STATS: &str = "📊 Стата";
+pub const BTN_SETTINGS: &str = "⚙️ Опції";
+pub const BTN_HELP: &str = "❓ Інфо";
+
+pub fn match_menu_button(trimmed: &str) -> Option<Command> {
+    match trimmed {
+        BTN_TINDER | "🔥 Мем-Тіндер" => Some(Command::Tinder),
+        BTN_RANDOM | "🎲 Випадковий мем" => Some(Command::Random),
+        BTN_LIKED | "❤️ Вподобані" => Some(Command::Liked),
+        BTN_TAGS => Some(Command::Tags),
+        BTN_DRIP => Some(Command::Drip),
+        BTN_STATS | "📊 Статистика" => Some(Command::Stats),
+        BTN_SETTINGS | "⚙️ Налаштування" => Some(Command::Settings),
+        BTN_HELP | "❓ Допомога" => Some(Command::Help),
+        _ => None,
+    }
+}
 
 pub const RESET_CODE_TTL: Duration = Duration::from_secs(120);
 
@@ -66,19 +81,66 @@ pub fn main_keyboard() -> KeyboardMarkup {
         vec![
             KeyboardButton::new(BTN_TINDER),
             KeyboardButton::new(BTN_RANDOM),
-        ],
-        vec![
             KeyboardButton::new(BTN_LIKED),
-            KeyboardButton::new(BTN_DRIP),
+            KeyboardButton::new(BTN_TAGS),
         ],
         vec![
+            KeyboardButton::new(BTN_DRIP),
             KeyboardButton::new(BTN_STATS),
             KeyboardButton::new(BTN_SETTINGS),
+            KeyboardButton::new(BTN_HELP),
         ],
-        vec![KeyboardButton::new(BTN_HELP)],
     ])
     .resize_keyboard()
-    .persistent()
+    .one_time_keyboard()
+}
+
+pub async fn tags(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Message, RequestError> {
+    let user_id = msg.chat.id.0;
+    let (tag_counts, tagged, total) = {
+        let store = state.meme_store.lock().await;
+        let counts = store.get_tag_counts(user_id);
+        let (tagged, total) = store.get_tagging_progress(crate::constants::CURRENT_TAGS_VERSION);
+        (counts, tagged, total)
+    };
+
+    if tag_counts.is_empty() {
+        return bot
+            .send_message(
+                msg.chat.id,
+                format!(
+                    "🏷️ Теги ще формуються у фоні ({}/{}).\nЗазирни сюди через кілька хвилин!",
+                    tagged, total
+                ),
+            )
+            .reply_markup(main_keyboard())
+            .await;
+    }
+
+    let mut text = String::from(
+        "🏷️ Категорії мемів\n\nНатисни на тег, щоб відкрити меми. Можна комбінувати кілька тегів і текст (наприклад: #мавпи #айті або #робота дедлайн).",
+    );
+    if tagged < total {
+        text.push_str(&format!("\n\n⏳ Проіндексовано тегів: {}/{}", tagged, total));
+    }
+
+    let rows: Vec<Vec<InlineKeyboardButton>> = tag_counts
+        .chunks(2)
+        .map(|pair| {
+            pair.iter()
+                .map(|(name, emoji, count)| {
+                    InlineKeyboardButton::switch_inline_query_current_chat(
+                        format!("{} #{} ({})", emoji, name, count),
+                        format!("#{} ", name),
+                    )
+                })
+                .collect()
+        })
+        .collect();
+
+    bot.send_message(msg.chat.id, text)
+        .reply_markup(InlineKeyboardMarkup::new(rows))
+        .await
 }
 
 pub async fn start(bot: Bot, msg: Message) -> Result<Message, RequestError> {
@@ -778,5 +840,35 @@ mod tests {
                 InlineKeyboardButtonKind::CallbackData("settings:back".to_string())
             );
         }
+    }
+
+    #[test]
+    fn main_keyboard_is_compact_two_by_four_and_auto_hiding() {
+        let kb = main_keyboard();
+        assert_eq!(kb.keyboard.len(), 2);
+        assert_eq!(kb.keyboard[0].len(), 4);
+        assert_eq!(kb.keyboard[1].len(), 4);
+        assert!(kb.resize_keyboard);
+        assert!(kb.one_time_keyboard);
+        assert!(!kb.is_persistent);
+    }
+
+    #[test]
+    fn match_menu_button_accepts_short_and_legacy_labels() {
+        assert!(matches!(match_menu_button(BTN_TINDER), Some(Command::Tinder)));
+        assert!(matches!(match_menu_button("🔥 Мем-Тіндер"), Some(Command::Tinder)));
+        assert!(matches!(match_menu_button(BTN_RANDOM), Some(Command::Random)));
+        assert!(matches!(match_menu_button("🎲 Випадковий мем"), Some(Command::Random)));
+        assert!(matches!(match_menu_button(BTN_LIKED), Some(Command::Liked)));
+        assert!(matches!(match_menu_button("❤️ Вподобані"), Some(Command::Liked)));
+        assert!(matches!(match_menu_button(BTN_TAGS), Some(Command::Tags)));
+        assert!(matches!(match_menu_button(BTN_DRIP), Some(Command::Drip)));
+        assert!(matches!(match_menu_button(BTN_STATS), Some(Command::Stats)));
+        assert!(matches!(match_menu_button("📊 Статистика"), Some(Command::Stats)));
+        assert!(matches!(match_menu_button(BTN_SETTINGS), Some(Command::Settings)));
+        assert!(matches!(match_menu_button("⚙️ Налаштування"), Some(Command::Settings)));
+        assert!(matches!(match_menu_button(BTN_HELP), Some(Command::Help)));
+        assert!(matches!(match_menu_button("❓ Допомога"), Some(Command::Help)));
+        assert!(match_menu_button("#коти мем").is_none());
     }
 }

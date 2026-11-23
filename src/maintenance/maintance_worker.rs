@@ -6,11 +6,14 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
-use crate::constants::CURRENT_VLM_VERSION;
+use crate::constants::{
+    CURRENT_TAGS_VERSION, CURRENT_VLM_VERSION, TAGS_STATE_REVIEWED_OTHER, TAGS_STATE_UNDETERMINED,
+};
 use crate::database::entity::media_type::MediaType;
 use crate::database::enums::vlm_error_enum::VlmError;
 use crate::helpers::embeding_helper::format_embedding_passage;
 use crate::helpers::telegram_bot_helper::download_telegram_file;
+use crate::tagger::{self, TagError};
 use crate::vlm;
 use crate::worker::MemeJob;
 use crate::{
@@ -39,6 +42,9 @@ pub fn start_maintenance(
             if app_config.auto_reprocess {
                 reprocess_vlm(Arc::clone(&state), bot.clone(), app_config, sender.clone()).await;
             }
+
+            backfill_tags(Arc::clone(&state), app_config, sender.clone()).await;
+            discover_new_categories(Arc::clone(&state), app_config, sender.clone()).await;
         }
     });
 }
@@ -234,5 +240,265 @@ async fn reprocess_vlm(
         debug!("Reprocess VLM pass done; nothing to reprocess");
     } else {
         info!(total, updated, skipped, "Reprocess VLM pass finished");
+    }
+}
+
+async fn backfill_tags(
+    state: Arc<AppState>,
+    app_config: &'static AppConfig,
+    sender: Sender<MemeJob>,
+) {
+    let (candidates, taxonomy) = {
+        let store = state.meme_store.lock().await;
+        (
+            store.get_memes_for_tagging(CURRENT_TAGS_VERSION, 150),
+            store.get_active_taxonomy(),
+        )
+    };
+
+    let total = candidates.len();
+    if total == 0 {
+        debug!("All memes already have tags; nothing to backfill");
+        return;
+    }
+
+    info!(batch_size = total, "Starting background meme tag backfill pass");
+
+    let mut tagged: usize = 0;
+    let mut consecutive_errors: u8 = 0;
+
+    for (idx, item) in candidates.into_iter().enumerate() {
+        while sender.capacity() < sender.max_capacity() {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
+        match tagger::classify_meme_tags(
+            &app_config.gemini_api_key,
+            &item.ocr_text,
+            &item.description_uk,
+            &item.description_en,
+            &item.title,
+            &taxonomy,
+        )
+        .await
+        {
+            Ok(res) => {
+                let tags_version = if res.is_undetermined {
+                    TAGS_STATE_UNDETERMINED
+                } else {
+                    CURRENT_TAGS_VERSION
+                };
+                let save_res = {
+                    let mut store = state.meme_store.lock().await;
+                    store.set_meme_tags(item.id, &res.tags, tags_version)
+                };
+                match save_res {
+                    Ok(()) => {
+                        tagged += 1;
+                        consecutive_errors = 0;
+                        if (idx + 1) % 25 == 0 || idx + 1 == total {
+                            info!(
+                                processed = idx + 1,
+                                total,
+                                tagged,
+                                "Background meme tag backfill progress"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(meme_id = item.id, error = %e, "Failed to save backfilled tags");
+                    }
+                }
+            }
+            Err(TagError::RateLimited(e)) => {
+                warn!(
+                    meme_id = item.id,
+                    error = %e,
+                    "Decision API rate-limited during tag backfill; pausing until next tick"
+                );
+                break;
+            }
+            Err(TagError::Transient(e)) => {
+                consecutive_errors += 1;
+                warn!(
+                    meme_id = item.id,
+                    consecutive_errors,
+                    error = %e,
+                    "Transient error during tag backfill"
+                );
+                if consecutive_errors >= 3 {
+                    warn!("Pausing tag backfill until next tick due to repeated transient errors");
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+
+    info!(tagged, total, "Tag backfill pass finished");
+}
+
+const DISCOVERY_MIN_BATCH: usize = 10;
+const DISCOVERY_BATCH_LIMIT: usize = 30;
+
+async fn discover_new_categories(
+    state: Arc<AppState>,
+    app_config: &'static AppConfig,
+    sender: Sender<MemeJob>,
+) {
+    let (samples, taxonomy) = {
+        let store = state.meme_store.lock().await;
+        (
+            store.get_undetermined_memes_for_discovery(DISCOVERY_BATCH_LIMIT),
+            store.get_active_taxonomy(),
+        )
+    };
+
+    if samples.len() < DISCOVERY_MIN_BATCH {
+        debug!(
+            pending = samples.len(),
+            min_batch = DISCOVERY_MIN_BATCH,
+            "Not enough undetermined memes for category discovery yet"
+        );
+        return;
+    }
+
+    let batch_ids: Vec<u64> = samples
+        .iter()
+        .filter_map(|s| u64::try_from(s.id).ok())
+        .collect();
+    let remaining_slots = tagger::MAX_ACTIVE_TAGS.saturating_sub(taxonomy.len());
+
+    if remaining_slots == 0 {
+        let mut store = state.meme_store.lock().await;
+        if let Err(e) = store.mark_memes_tags_version(&batch_ids, TAGS_STATE_REVIEWED_OTHER) {
+            warn!(error = %e, "Failed to mark undetermined memes as reviewed at tag cap");
+        }
+        return;
+    }
+
+    while sender.capacity() < sender.max_capacity() {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    let proposed = match tagger::propose_new_categories(
+        &app_config.gemini_api_key,
+        &samples,
+        &taxonomy,
+        remaining_slots,
+    )
+    .await
+    {
+        Ok(list) => list,
+        Err(e) => {
+            warn!(
+                error = ?e,
+                "Category discovery call failed; will retry on next tick"
+            );
+            return;
+        }
+    };
+
+    if proposed.is_empty() {
+        let mut store = state.meme_store.lock().await;
+        if let Err(e) = store.mark_memes_tags_version(&batch_ids, TAGS_STATE_REVIEWED_OTHER) {
+            warn!(error = %e, "Failed to mark reviewed undetermined memes");
+        } else {
+            info!(
+                reviewed = batch_ids.len(),
+                "Category discovery found no recurring missing categories"
+            );
+        }
+        return;
+    }
+
+    let (added_slugs, updated_taxonomy) = {
+        let mut store = state.meme_store.lock().await;
+        let mut added = Vec::new();
+        for def in &proposed {
+            match store.add_dynamic_category(def) {
+                Ok(true) => added.push(def.slug.clone()),
+                Ok(false) => {}
+                Err(e) => warn!(slug = %def.slug, error = %e, "Failed to store dynamic category"),
+            }
+        }
+        let updated = store.get_active_taxonomy();
+        (added, updated)
+    };
+
+    if added_slugs.is_empty() {
+        let mut store = state.meme_store.lock().await;
+        if let Err(e) = store.mark_memes_tags_version(&batch_ids, TAGS_STATE_REVIEWED_OTHER) {
+            warn!(error = %e, "Failed to mark reviewed undetermined memes after empty insert");
+        }
+        return;
+    }
+
+    info!(
+        new_categories = ?added_slugs,
+        batch_size = samples.len(),
+        "Discovered new categories; re-classifying undetermined batch once"
+    );
+
+    let mut consecutive_errors: u8 = 0;
+    for item in samples {
+        let Ok(meme_id) = u64::try_from(item.id) else {
+            continue;
+        };
+
+        while sender.capacity() < sender.max_capacity() {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+
+        match tagger::classify_meme_tags(
+            &app_config.gemini_api_key,
+            &item.ocr_text,
+            &item.description_uk,
+            &item.description_en,
+            &item.title,
+            &updated_taxonomy,
+        )
+        .await
+        {
+            Ok(res) => {
+                consecutive_errors = 0;
+                let tags_version = if res.is_undetermined {
+                    TAGS_STATE_REVIEWED_OTHER
+                } else {
+                    CURRENT_TAGS_VERSION
+                };
+                let save_res = {
+                    let mut store = state.meme_store.lock().await;
+                    store.set_meme_tags(meme_id, &res.tags, tags_version)
+                };
+                if let Err(e) = save_res {
+                    warn!(meme_id, error = %e, "Failed to save re-classified discovery meme tags");
+                }
+            }
+            Err(TagError::RateLimited(e)) => {
+                warn!(
+                    meme_id,
+                    error = %e,
+                    "Decision API rate-limited during discovery re-classification; pausing"
+                );
+                break;
+            }
+            Err(TagError::Transient(e)) => {
+                consecutive_errors += 1;
+                warn!(
+                    meme_id,
+                    consecutive_errors,
+                    error = %e,
+                    "Transient error during discovery re-classification"
+                );
+                if consecutive_errors >= 3 {
+                    warn!("Stopping discovery re-classification after repeated transient errors");
+                    break;
+                }
+            }
+        }
+
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }

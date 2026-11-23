@@ -150,6 +150,9 @@ pub async fn message_handler(
                 Ok(Command::Drip) => {
                     drip::cmd_drip(bot, msg, state).await?;
                 }
+                Ok(Command::Tags) => {
+                    comand::tags(bot, msg, state).await?;
+                }
                 Err(_) => {
                     comand::error(bot, msg).await?;
                 }
@@ -158,49 +161,38 @@ pub async fn message_handler(
         }
 
         let trimmed = text.trim();
-        if matches!(
-            trimmed,
-            comand::BTN_TINDER
-                | comand::BTN_LIKED
-                | comand::BTN_DRIP
-                | comand::BTN_RANDOM
-                | comand::BTN_STATS
-                | comand::BTN_SETTINGS
-                | comand::BTN_HELP
-        ) {
+        if let Some(cmd) = comand::match_menu_button(trimmed) {
             comand::clear_pending_reset(&state, user_id).await;
-        }
-
-        match trimmed {
-            comand::BTN_TINDER => {
-                tinder::cmd_tinder(bot, msg, state).await?;
-                return Ok(());
+            match cmd {
+                Command::Start => {
+                    comand::start(bot, msg).await?;
+                }
+                Command::Tinder => {
+                    tinder::cmd_tinder(bot, msg, state).await?;
+                }
+                Command::Liked => {
+                    tinder::cmd_liked(bot, msg, state).await?;
+                }
+                Command::Tags => {
+                    comand::tags(bot, msg, state).await?;
+                }
+                Command::Drip => {
+                    drip::cmd_drip(bot, msg, state).await?;
+                }
+                Command::Random => {
+                    comand::random(bot, msg, state).await?;
+                }
+                Command::Stats => {
+                    comand::stats(bot, msg, state, app_config, &sender).await?;
+                }
+                Command::Settings => {
+                    comand::settings(bot, msg, state).await?;
+                }
+                Command::Help => {
+                    comand::help(bot, msg).await?;
+                }
             }
-            comand::BTN_LIKED => {
-                tinder::cmd_liked(bot, msg, state).await?;
-                return Ok(());
-            }
-            comand::BTN_DRIP => {
-                drip::cmd_drip(bot, msg, state).await?;
-                return Ok(());
-            }
-            comand::BTN_RANDOM => {
-                comand::random(bot, msg, state).await?;
-                return Ok(());
-            }
-            comand::BTN_STATS => {
-                comand::stats(bot, msg, state, app_config, &sender).await?;
-                return Ok(());
-            }
-            comand::BTN_SETTINGS => {
-                comand::settings(bot, msg, state).await?;
-                return Ok(());
-            }
-            comand::BTN_HELP => {
-                comand::help(bot, msg).await?;
-                return Ok(());
-            }
-            _ => {}
+            return Ok(());
         }
 
         if comand::try_handle_pending_reset(&bot, &msg, text, &state).await? {

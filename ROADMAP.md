@@ -612,12 +612,12 @@ Meme ID: 1793041234
     - [x] Report live MPSC queue backlog depth and SQLite DB file size.
     - [ ] Track Gemini Free Tier quotas consumed (RPD counter & RPM pacing).
     - [ ] Measure vector search execution latency (ms) and FastEmbed inference time.
-  - [ ] Automatic meme categorization & Hashtag directory (`/tags`):
-    - [ ] Use **`gemini-decision-1`** (`POST /v1beta/decisions`) batch `noul` checks against a fixed normalized taxonomy (30–100 categories in 1 call over `ocr_text + description_uk` — zero text-generation tag drift, fits within `10K RPD` backfill).
-    - [ ] Create SQLite tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
-    - [ ] Implement `/tags` command displaying all categories with live meme counts (`#category (N)`).
-    - [ ] Add interactive Inline buttons on `/tags` to trigger one-tap inline search for selected tag.
-    - [ ] Support combined tag filtering in inline queries (`@MnemosyneM_bot #work deadline`).
+  - [x] Automatic meme categorization & Hashtag directory (`/tags`):
+    - [x] Use **`gemini-decision-1`** (`POST /v1beta/decisions`) batch `noul` checks against a fixed normalized taxonomy (30–100 categories in 1 call over `ocr_text + description_uk` — zero text-generation tag drift, fits within `10K RPD` backfill).
+    - [x] Create SQLite tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
+    - [x] Implement `/tags` command displaying all categories with live meme counts (`#category (N)`).
+    - [x] Add interactive Inline buttons on `/tags` to trigger one-tap inline search for selected tag.
+    - [x] Support combined tag filtering in inline queries (`@MnemosyneM_bot #work deadline`).
   - [x] Native Telegram Meme Tinder & Reactions (`/tinder` & `/liked`):
     - [x] SQLite schema `user_reactions (user_id, meme_id, reaction, created_at)` for `'like'`, `'skip'`, `'dislike'`.
     - [x] Interactive `/tinder` UI: send photo/GIF with single-row layout `[ ❤️ Лайк ]`, `[ 👎 ]`, `[ ⏭️ Скіп ]` (+ skip reset button when exhausted).

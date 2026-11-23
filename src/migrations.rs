@@ -28,6 +28,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_memes_fts_index(&mut conn)?;
     add_user_reactions_table(&mut conn)?;
     add_drip_subscription_tables(&mut conn)?;
+    add_tags_tables(&mut conn)?;
 
     Ok(())
 }
@@ -469,6 +470,85 @@ fn add_drip_subscription_tables(conn: &mut Connection) -> Result<(), String> {
             delivered_at BIGINT NOT NULL,
             PRIMARY KEY (user_id, meme_id)
         );
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    info!(migration = %migration_name, "Migration finished successfully");
+    Ok(())
+}
+
+fn add_tags_tables(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795454000_add_tags_tables".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    info!(
+        migration = %migration_name,
+        "Creating tags, meme_tags tables and memes.tags_version column"
+    );
+
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(memes)")
+        .map_err(|e| e.to_string())?;
+    let columns = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| e.to_string())?;
+
+    let mut has_tags_version = false;
+    for column in columns.flatten() {
+        if column == "tags_version" {
+            has_tags_version = true;
+            break;
+        }
+    }
+    drop(stmt);
+
+    if !has_tags_version {
+        conn.execute(
+            "ALTER TABLE memes ADD COLUMN tags_version INTEGER NOT NULL DEFAULT 0",
+            [],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS tags (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            emoji TEXT NOT NULL DEFAULT '🏷️',
+            instruction TEXT NOT NULL DEFAULT '',
+            is_active BOOLEAN NOT NULL DEFAULT 1
+        );
+        CREATE TABLE IF NOT EXISTS meme_tags (
+            meme_id BIGINT NOT NULL,
+            tag_id INTEGER NOT NULL,
+            confidence REAL NOT NULL DEFAULT 1.0,
+            PRIMARY KEY (meme_id, tag_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_meme_tags_tag_id
+            ON meme_tags(tag_id, meme_id);
         ",
     )
     .map_err(|e| e.to_string())?;

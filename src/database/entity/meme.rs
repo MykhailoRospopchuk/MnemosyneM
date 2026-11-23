@@ -18,9 +18,15 @@ pub struct Meme {
     pub phash: u64,
     pub media_type: MediaType,
     pub thumbnail_tg_id: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 impl Meme {
+    pub fn has_tag(&self, tag: &str) -> bool {
+        self.tags.iter().any(|t| t == tag)
+    }
+
     pub fn is_owned_by(&self, user_id: i64) -> bool {
         self.owners.contains(&user_id)
     }

@@ -3,7 +3,8 @@ use crate::config::AppConfig;
 use crate::database::entity::media_type::MediaType;
 use crate::database::entity::meme::Meme;
 use crate::database::enums::book_mark_status_enum::BookMarkStatus;
-use crate::helpers::searsh_query_helper::parse_media_filter;
+use crate::helpers::searsh_query_helper::parse_search_query;
+use crate::meme_store::SearchFilter;
 use crate::reranker::filter_reranked;
 use crate::worker::MemeJob;
 use std::sync::Arc;
@@ -186,7 +187,7 @@ async fn run_search(
     app_config: &AppConfig,
     clean_query: &str,
     user_id: i64,
-    media_filter: Option<MediaType>,
+    filter: SearchFilter<'_>,
     candidate_limit: usize,
     use_reranker: bool,
 ) -> Result<Vec<(Meme, f32)>, String> {
@@ -214,7 +215,7 @@ async fn run_search(
         let mut engine = state.engine.lock().await;
         let meme_store = state.meme_store.lock().await;
         let results = meme_store
-            .search_top_k(clean_query, &mut engine, app_config, user_id, media_filter)?
+            .search_top_k(clean_query, &mut engine, app_config, user_id, filter)?
             .into_iter()
             .map(|(meme, score)| (meme.clone(), score))
             .collect();
@@ -229,7 +230,7 @@ async fn run_search(
             &mut engine,
             app_config,
             user_id,
-            media_filter,
+            filter,
             candidate_limit,
         )?
     };
@@ -278,6 +279,82 @@ async fn run_search(
     Ok(results)
 }
 
+async fn send_search_results(
+    bot: &Bot,
+    msg: &Message,
+    valid_memes: Vec<(Meme, f32)>,
+    user_id: i64,
+    username: &str,
+) -> ResponseResult<()> {
+    let mut photo_items: Vec<(String, String)> = Vec::new();
+
+    for (media, score) in valid_memes {
+        let caption = build_caption(&media.source_title, &media.source_url, &score);
+        match media.media_type {
+            MediaType::Animation => {
+                if let Err(e) = bot
+                    .send_animation(
+                        msg.chat.id,
+                        InputFile::file_id(FileId(media.file_tg_id.clone())),
+                    )
+                    .caption(caption)
+                    .await
+                {
+                    error!(
+                        user_id,
+                        username,
+                        error = ?e,
+                        "Telegram send_animation failed"
+                    );
+                    bot.send_message(msg.chat.id, format!("Send animation error: {}", e))
+                        .await?;
+                }
+            }
+            MediaType::Photo => {
+                photo_items.push((media.file_tg_id.clone(), caption));
+            }
+        }
+    }
+
+    match photo_items.len() {
+        0 => {}
+        1 => {
+            let (file_id, caption) = photo_items.remove(0);
+            if let Err(e) = bot
+                .send_photo(msg.chat.id, InputFile::file_id(FileId(file_id)))
+                .caption(caption)
+                .await
+            {
+                error!(user_id, username, error = ?e, "Telegram send_photo failed");
+                bot.send_message(msg.chat.id, format!("Send photo error: {}", e))
+                    .await?;
+            }
+        }
+        _ => {
+            let result_media_group: Vec<InputMedia> = photo_items
+                .into_iter()
+                .map(|(file_id, caption)| {
+                    InputMedia::Photo(
+                        InputMediaPhoto::new(InputFile::file_id(FileId(file_id))).caption(caption),
+                    )
+                })
+                .collect();
+            if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await {
+                error!(
+                    user_id,
+                    username,
+                    error = ?e,
+                    "Telegram send_media_group failed"
+                );
+                bot.send_message(msg.chat.id, format!("Send album error: {}", e))
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub async fn handle_search(
     bot: &Bot,
     msg: &Message,
@@ -285,9 +362,57 @@ pub async fn handle_search(
     state: &Arc<AppState>,
     app_config: &'static AppConfig,
 ) -> ResponseResult<()> {
-    let (media_filter, clean_query) = parse_media_filter(text);
+    let parsed = parse_search_query(text);
+    let user_id = msg.chat.id.0;
+    let username = msg
+        .from
+        .as_ref()
+        .and_then(|u| u.username.as_deref())
+        .unwrap_or("-");
 
-    if clean_query.is_empty() {
+    if parsed.clean_query.is_empty() {
+        if !parsed.tag_filters.is_empty() {
+            let tagged_memes: Vec<(Meme, f32)> = {
+                let store = state.meme_store.lock().await;
+                store
+                    .get_memes_by_tags(
+                        user_id,
+                        &parsed.tag_filters,
+                        app_config.top_k,
+                        parsed.media_filter,
+                    )
+                    .into_iter()
+                    .map(|m| (m.clone(), 1.0))
+                    .collect()
+            };
+
+            info!(
+                user_id,
+                username,
+                tag_filters = ?parsed.tag_filters,
+                media_filter = ?parsed.media_filter,
+                results = tagged_memes.len(),
+                "Tag browse search executed"
+            );
+
+            if tagged_memes.is_empty() {
+                let tags_label = parsed
+                    .tag_filters
+                    .iter()
+                    .map(|t| format!("#{}", t))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                bot.send_message(
+                    msg.chat.id,
+                    format!("За тегами {} поки нічого не знайдено.", tags_label),
+                )
+                .await?;
+            } else {
+                send_search_results(bot, msg, tagged_memes, user_id, username).await?;
+            }
+            return Ok(());
+        }
+
         bot.send_message(
             msg.chat.id,
             "User ..!gif... or ...!img... and then your search",
@@ -296,22 +421,20 @@ pub async fn handle_search(
         return Ok(());
     }
 
-    let user_id = msg.chat.id.0;
-    let username = msg
-        .from
-        .as_ref()
-        .and_then(|u| u.username.as_deref())
-        .unwrap_or("-");
     let t0 = Instant::now();
-
     bot.send_message(msg.chat.id, "Process search...").await?;
+
+    let filter = SearchFilter {
+        media: parsed.media_filter,
+        tags: &parsed.tag_filters,
+    };
 
     match run_search(
         state,
         app_config,
-        &clean_query,
+        &parsed.clean_query,
         user_id,
-        media_filter,
+        filter,
         app_config.rerank_candidates,
         true,
     )
@@ -321,8 +444,9 @@ pub async fn handle_search(
             info!(
                 user_id,
                 username,
-                query = %clean_query,
-                ?media_filter,
+                query = %parsed.clean_query,
+                media_filter = ?parsed.media_filter,
+                tag_filters = ?parsed.tag_filters,
                 results = 0usize,
                 latency_ms = t0.elapsed().as_millis(),
                 "Search completed"
@@ -339,8 +463,9 @@ pub async fn handle_search(
             info!(
                 user_id,
                 username,
-                query = %clean_query,
-                ?media_filter,
+                query = %parsed.clean_query,
+                media_filter = ?parsed.media_filter,
+                tag_filters = ?parsed.tag_filters,
                 results = results_count,
                 latency_ms = t0.elapsed().as_millis(),
                 "Search completed"
@@ -350,88 +475,15 @@ pub async fn handle_search(
                 bot.send_message(msg.chat.id, "There is nothing useful here...")
                     .await?;
             } else {
-                let mut photo_items: Vec<(String, String)> = Vec::new();
-
-                for (media, score) in valid_memes {
-                    let caption = build_caption(&media.source_title, &media.source_url, &score);
-                    match media.media_type {
-                        MediaType::Animation => {
-                            if let Err(e) = bot
-                                .send_animation(
-                                    msg.chat.id,
-                                    InputFile::file_id(FileId(media.file_tg_id.clone())),
-                                )
-                                .caption(caption)
-                                .await
-                            {
-                                error!(
-                                    user_id,
-                                    username,
-                                    error = ?e,
-                                    "Telegram send_animation failed"
-                                );
-                                bot.send_message(
-                                    msg.chat.id,
-                                    format!("Send animation error: {}", e),
-                                )
-                                .await?;
-                            }
-                        }
-                        MediaType::Photo => {
-                            photo_items.push((media.file_tg_id.clone(), caption));
-                        }
-                    }
-                }
-
-                match photo_items.len() {
-                    0 => {}
-                    1 => {
-                        let (file_id, caption) = photo_items.remove(0);
-                        if let Err(e) = bot
-                            .send_photo(msg.chat.id, InputFile::file_id(FileId(file_id)))
-                            .caption(caption)
-                            .await
-                        {
-                            error!(
-                                user_id,
-                                username,
-                                error = ?e,
-                                "Telegram send_photo failed"
-                            );
-                            bot.send_message(msg.chat.id, format!("Send photo error: {}", e))
-                                .await?;
-                        }
-                    }
-                    _ => {
-                        let result_media_group: Vec<InputMedia> = photo_items
-                            .into_iter()
-                            .map(|(file_id, caption)| {
-                                InputMedia::Photo(
-                                    InputMediaPhoto::new(InputFile::file_id(FileId(file_id)))
-                                        .caption(caption),
-                                )
-                            })
-                            .collect();
-                        if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await
-                        {
-                            error!(
-                                user_id,
-                                username,
-                                error = ?e,
-                                "Telegram send_media_group failed"
-                            );
-                            bot.send_message(msg.chat.id, format!("Send album error: {}", e))
-                                .await?;
-                        }
-                    }
-                }
+                send_search_results(bot, msg, valid_memes, user_id, username).await?;
             }
         }
         Err(e) => {
             error!(
                 user_id,
                 username,
-                query = %clean_query,
+                query = %parsed.clean_query,
+                tag_filters = ?parsed.tag_filters,
                 error = %e,
                 "Search failed"
             );
@@ -450,7 +502,7 @@ pub async fn handle_inline_query(
 ) -> ResponseResult<()> {
     let user_id = query.from.id.0 as i64;
     let username = query.from.username.as_deref().unwrap_or("-");
-    let (media_filter, clean_query) = parse_media_filter(&query.query);
+    let parsed = parse_search_query(&query.query);
 
     let make_inline_result = |idx: usize, meme: &Meme, score: f32| -> InlineQueryResult {
         let caption = build_caption(&meme.source_title, &meme.source_url, &score);
@@ -473,9 +525,13 @@ pub async fn handle_inline_query(
         }
     };
 
-    if clean_query.is_empty() {
+    if parsed.clean_query.is_empty() {
         let meme_store = state.meme_store.lock().await;
-        let recent_memes = meme_store.get_recent_memes(user_id, app_config.top_k, media_filter);
+        let recent_memes = if !parsed.tag_filters.is_empty() {
+            meme_store.get_memes_by_tags(user_id, &parsed.tag_filters, 25, parsed.media_filter)
+        } else {
+            meme_store.get_recent_memes(user_id, app_config.top_k, parsed.media_filter)
+        };
 
         let result: Vec<InlineQueryResult> = recent_memes
             .into_iter()
@@ -483,6 +539,7 @@ pub async fn handle_inline_query(
             .filter(|(_, meme)| !meme.file_tg_id.is_empty())
             .map(|(idx, meme)| make_inline_result(idx, meme, 1.0))
             .collect();
+        drop(meme_store);
 
         if let Err(e) = bot
             .answer_inline_query(query.id, result)
@@ -493,14 +550,15 @@ pub async fn handle_inline_query(
             error!(
                 user_id,
                 username,
+                tag_filters = ?parsed.tag_filters,
                 error = %e,
-                "Inline search for empty query failed"
+                "Inline search for empty/tag query failed"
             );
         }
         return Ok(());
     }
 
-    if clean_query.chars().count() < 4 {
+    if parsed.clean_query.chars().count() < 4 {
         if let Err(e) = bot
             .answer_inline_query(query.id.clone(), vec![])
             .is_personal(true)
@@ -532,12 +590,16 @@ pub async fn handle_inline_query(
     }
 
     let t0 = Instant::now();
+    let filter = SearchFilter {
+        media: parsed.media_filter,
+        tags: &parsed.tag_filters,
+    };
     let results = match run_search(
         &state,
         app_config,
-        &clean_query,
+        &parsed.clean_query,
         user_id,
-        media_filter,
+        filter,
         app_config.rerank_candidates.min(8),
         app_config.rerank_inline,
     )
@@ -553,8 +615,9 @@ pub async fn handle_inline_query(
             info!(
                 user_id,
                 username,
-                query = %clean_query,
-                ?media_filter,
+                query = %parsed.clean_query,
+                media_filter = ?parsed.media_filter,
+                tag_filters = ?parsed.tag_filters,
                 results = items.len(),
                 latency_ms = t0.elapsed().as_millis(),
                 "Inline search completed"
@@ -565,7 +628,8 @@ pub async fn handle_inline_query(
             error!(
                 user_id,
                 username,
-                query = %clean_query,
+                query = %parsed.clean_query,
+                tag_filters = ?parsed.tag_filters,
                 error = %e,
                 "Inline search failed"
             );

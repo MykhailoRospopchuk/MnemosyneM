@@ -293,6 +293,7 @@ pub fn start_worker(
             } else {
                 job.captions
             };
+            let title_for_tagger = user_title.clone();
 
             let save_result = {
                 let mut engine = state.engine.lock().await;
@@ -326,6 +327,56 @@ pub fn start_worker(
                         file_unique_id = %file_unique_id,
                         "Meme saved to SQLite"
                     );
+                    let taxonomy = {
+                        let meme_store = state.meme_store.lock().await;
+                        meme_store.get_active_taxonomy()
+                    };
+                    match crate::tagger::classify_meme_tags(
+                        &app_config.gemini_api_key,
+                        &analysis.ocr_text,
+                        &analysis.uk_description,
+                        &analysis.en_description,
+                        &title_for_tagger,
+                        &taxonomy,
+                    )
+                    .await
+                    {
+                        Ok(res) => {
+                            let tags_count = res.tags.len();
+                            let tags_version = if res.is_undetermined {
+                                constants::TAGS_STATE_UNDETERMINED
+                            } else {
+                                constants::CURRENT_TAGS_VERSION
+                            };
+                            let tag_save_res = {
+                                let mut meme_store = state.meme_store.lock().await;
+                                meme_store.set_meme_tags(id, &res.tags, tags_version)
+                            };
+                            match tag_save_res {
+                                Ok(()) => info!(
+                                    user_id,
+                                    meme_id = id,
+                                    tags_count,
+                                    is_undetermined = res.is_undetermined,
+                                    "Auto-tagged newly uploaded meme"
+                                ),
+                                Err(e) => warn!(
+                                    user_id,
+                                    meme_id = id,
+                                    error = %e,
+                                    "Failed to save tags for newly uploaded meme"
+                                ),
+                            }
+                        }
+                        Err(e) => {
+                            warn!(
+                                user_id,
+                                meme_id = id,
+                                error = ?e,
+                                "Failed to auto-tag new meme; maintenance worker will backfill"
+                            );
+                        }
+                    }
                     reply_to_job(
                         &bot,
                         job.chat_id,

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatId, FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message,
+    ChatId, FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, Message, ParseMode,
 };
 use tokio::time::{MissedTickBehavior, interval};
 use tracing::{info, warn};
@@ -249,16 +249,10 @@ fn format_drip_panel(
 }
 
 fn drip_meme_caption(meme: &Meme) -> String {
-    if meme.source_url.is_empty() {
-        "🎲 Мем-сюрприз!".to_string()
-    } else if meme.source_title.is_empty() {
-        format!("🎲 Мем-сюрприз!\n📎 ({})", meme.source_url)
-    } else {
-        format!(
-            "🎲 Мем-сюрприз!\n📎 [{}] ({})",
-            meme.source_title, meme.source_url
-        )
-    }
+    format!(
+        "🎲 Мем-сюрприз{}",
+        crate::bot::tinder::format_source_html(meme)
+    )
 }
 
 fn drip_meme_keyboard(meme_id: u64) -> InlineKeyboardMarkup {
@@ -281,12 +275,14 @@ async fn send_drip_meme(
         MediaType::Photo => {
             bot.send_photo(chat_id, file)
                 .caption(caption)
+                .parse_mode(ParseMode::Html)
                 .reply_markup(keyboard)
                 .await
         }
         MediaType::Animation => {
             bot.send_animation(chat_id, file)
                 .caption(caption)
+                .parse_mode(ParseMode::Html)
                 .reply_markup(keyboard)
                 .await
         }

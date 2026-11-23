@@ -22,4 +22,6 @@ pub enum Command {
     Liked,
     #[command(description = "Random meme subscription (Meme Drip)")]
     Drip,
+    #[command(description = "Browse meme categories and tags")]
+    Tags,
 }

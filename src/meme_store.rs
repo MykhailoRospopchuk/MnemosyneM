@@ -1,9 +1,11 @@
 use crate::{
     config::AppConfig,
+    constants::TAGS_STATE_UNDETERMINED,
     database::entity::memes_fts::MemesFts,
     helpers::{
         db_helper::upsert_fts_entry, embeding_helper::format_embedding_passage, lexical_helper,
     },
+    tagger::{DiscoverySample, DynamicTagDef, OTHER_TAG_EMOJI, OTHER_TAG_SLUG, TAG_TAXONOMY, tag_emoji},
     vlm::MemeAnalysis,
 };
 use rusqlite::{Connection, params};
@@ -74,6 +76,21 @@ pub struct DripSubscription {
     pub quiet_end_hour: u8,
     pub next_delivery_at: u64,
     pub is_active: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SearchFilter<'a> {
+    pub media: Option<MediaType>,
+    pub tags: &'a [String],
+}
+
+#[derive(Debug, Clone)]
+pub struct TagCandidate {
+    pub id: u64,
+    pub title: String,
+    pub ocr_text: String,
+    pub description_uk: String,
+    pub description_en: String,
 }
 
 struct FtsHit {
@@ -230,6 +247,7 @@ impl MemeStore {
             phash: new_meme.phash,
             media_type: new_meme.media_type,
             thumbnail_tg_id: new_meme.thumbnail_tg_id,
+            tags: Vec::new(),
         };
 
         if let Some(item) = self
@@ -329,7 +347,8 @@ impl MemeStore {
                 phash BIGINT NOT NULL DEFAULT 0,
                 media_type INTEGER NOT NULL DEFAULT 0,
                 thumbnail_tg_id TEXT NOT NULL DEFAULT '',
-                vlm_version BIGINT NOT NULL DEFAULT 1
+                vlm_version BIGINT NOT NULL DEFAULT 1,
+                tags_version INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS users (
@@ -390,7 +409,47 @@ impl MemeStore {
                 delivered_at BIGINT NOT NULL,
                 PRIMARY KEY (user_id, meme_id)
             );
+
+            CREATE TABLE IF NOT EXISTS tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                emoji TEXT NOT NULL DEFAULT '🏷️',
+                instruction TEXT NOT NULL DEFAULT '',
+                is_active BOOLEAN NOT NULL DEFAULT 1
+            );
+
+            CREATE TABLE IF NOT EXISTS meme_tags (
+                meme_id BIGINT NOT NULL,
+                tag_id INTEGER NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                PRIMARY KEY (meme_id, tag_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_meme_tags_tag_id
+                ON meme_tags(tag_id, meme_id);
             ",
+        )
+        .map_err(|e| e.to_string())?;
+
+        for def in TAG_TAXONOMY {
+            conn.execute(
+                "INSERT INTO tags (name, emoji, instruction, is_active)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(name) DO UPDATE SET
+                     emoji = excluded.emoji,
+                     instruction = excluded.instruction",
+                params![def.slug, def.emoji, def.instruction],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        conn.execute(
+            "INSERT INTO tags (name, emoji, instruction, is_active)
+             VALUES (?1, ?2, '', 0)
+             ON CONFLICT(name) DO UPDATE SET
+                 emoji = excluded.emoji,
+                 is_active = 0",
+            params![OTHER_TAG_SLUG, OTHER_TAG_EMOJI],
         )
         .map_err(|e| e.to_string())?;
 
@@ -427,6 +486,7 @@ impl MemeStore {
                     phash,
                     media_type,
                     thumbnail_tg_id,
+                    tags: Vec::new(),
                 })
             })
             .map_err(|e| e.to_string())?;
@@ -474,6 +534,28 @@ impl MemeStore {
         }
 
         drop(um_stmt);
+
+        let mut tag_stmt = conn
+            .prepare(
+                "SELECT mt.meme_id, t.name
+                 FROM meme_tags mt
+                 JOIN tags t ON t.id = mt.tag_id
+                 ORDER BY mt.confidence DESC, t.name ASC",
+            )
+            .map_err(|e| e.to_string())?;
+        let tag_iter = tag_stmt
+            .query_map([], |row| {
+                let meme_id: u64 = row.get(0)?;
+                let tag_name: String = row.get(1)?;
+                Ok((meme_id, tag_name))
+            })
+            .map_err(|e| e.to_string())?;
+        for (meme_id, tag_name) in tag_iter.flatten() {
+            if let Some(mem) = memes_map.get_mut(&meme_id) {
+                mem.tags.push(tag_name);
+            }
+        }
+        drop(tag_stmt);
 
         let mut memes: Vec<Meme> = memes_map.into_values().collect();
         memes.sort_by_key(|m| m.id);
@@ -661,7 +743,7 @@ impl MemeStore {
         engine: &mut ClipEngine,
         app_config: &AppConfig,
         user_id: i64,
-        media_filter: Option<MediaType>,
+        filter: SearchFilter<'_>,
     ) -> Result<Vec<(&'a Meme, f32)>, String> {
         let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
         let settings = self.get_user_settings(user_id);
@@ -671,7 +753,7 @@ impl MemeStore {
             app_config,
             user_id,
             settings.search_scope,
-            media_filter,
+            filter,
         );
         Ok(top_k)
     }
@@ -682,7 +764,7 @@ impl MemeStore {
         engine: &mut ClipEngine,
         app_config: &AppConfig,
         user_id: i64,
-        media_filter: Option<MediaType>,
+        filter: SearchFilter<'_>,
         candidate_limit: usize,
     ) -> Result<Vec<Stage1Candidate>, String> {
         let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
@@ -693,7 +775,7 @@ impl MemeStore {
             app_config,
             user_id,
             &settings.search_scope,
-            media_filter,
+            filter,
             candidate_limit,
         ))
     }
@@ -705,7 +787,7 @@ impl MemeStore {
         app_config: &AppConfig,
         user_id: i64,
         scope_visibility: &str,
-        media_filter: Option<MediaType>,
+        filter: SearchFilter<'_>,
         candidate_limit: usize,
     ) -> Vec<Stage1Candidate> {
         if candidate_limit == 0 {
@@ -719,7 +801,7 @@ impl MemeStore {
             &self.memes,
             user_id,
             scope_visibility,
-            media_filter,
+            filter,
             &fts_hits,
         );
 
@@ -802,7 +884,7 @@ impl MemeStore {
         app_config: &AppConfig,
         user_id: i64,
         scope_visibility: String,
-        media_filter: Option<MediaType>,
+        filter: SearchFilter<'_>,
     ) -> Vec<(&Meme, f32)> {
         let fts_hits = self.query_fts_hits(query_text, BM25_MATCH_LIMIT);
 
@@ -813,7 +895,7 @@ impl MemeStore {
             app_config,
             user_id,
             scope_visibility,
-            media_filter,
+            filter,
             &fts_hits,
         )
     }
@@ -1446,6 +1528,261 @@ impl MemeStore {
         let idx = (hasher.finish() as usize) % candidates.len();
         Some(candidates[idx].clone())
     }
+
+    pub fn set_meme_tags(
+        &mut self,
+        meme_id: u64,
+        tags: &[(String, f32)],
+        tags_version: i64,
+    ) -> Result<(), String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute(
+            "DELETE FROM meme_tags WHERE meme_id = ?",
+            params![meme_id as i64],
+        )
+        .map_err(|e| e.to_string())?;
+
+        for (tag_name, confidence) in tags {
+            tx.execute(
+                "INSERT INTO tags (name) VALUES (?) ON CONFLICT(name) DO NOTHING",
+                params![tag_name],
+            )
+            .map_err(|e| e.to_string())?;
+
+            let tag_id: i64 = tx
+                .query_row(
+                    "SELECT id FROM tags WHERE name = ?",
+                    params![tag_name],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+
+            tx.execute(
+                "INSERT INTO meme_tags (meme_id, tag_id, confidence) VALUES (?, ?, ?)",
+                params![meme_id as i64, tag_id, *confidence as f64],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+
+        tx.execute(
+            "UPDATE memes SET tags_version = ? WHERE id = ?",
+            params![tags_version, meme_id as i64],
+        )
+        .map_err(|e| e.to_string())?;
+
+        tx.commit().map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            meme.tags = tags.iter().map(|(name, _)| name.clone()).collect();
+        }
+
+        Ok(())
+    }
+
+    pub fn get_memes_for_tagging(&self, target_version: i64, limit: usize) -> Vec<TagCandidate> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, title, ocr_text, description_uk, description_en
+             FROM memes
+             WHERE tags_version < ? AND tags_version >= 0
+             ORDER BY id DESC
+             LIMIT ?",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![target_version, limit as i64], |row| {
+            Ok(TagCandidate {
+                id: row.get(0)?,
+                title: row.get(1)?,
+                ocr_text: row.get(2)?,
+                description_uk: row.get(3)?,
+                description_en: row.get(4)?,
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn get_tagging_progress(&self, target_version: i64) -> (usize, usize) {
+        let tagged: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memes WHERE tags_version >= ? OR tags_version < 0",
+                params![target_version],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        let total: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM memes", [], |row| row.get::<_, i64>(0))
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        (tagged, total)
+    }
+
+    pub fn get_tag_counts(&self, user_id: i64) -> Vec<(String, String, usize)> {
+        let settings = self.get_user_settings(user_id);
+        let mut counts: HashMap<String, usize> = HashMap::new();
+
+        for meme in &self.memes {
+            if meme.file_tg_id.is_empty()
+                || !meme.is_visible_to(user_id, &settings.search_scope)
+            {
+                continue;
+            }
+            for tag in &meme.tags {
+                *counts.entry(tag.clone()).or_insert(0) += 1;
+            }
+        }
+
+        let mut emoji_map: HashMap<String, String> = HashMap::new();
+        if let Ok(mut stmt) = self.conn.prepare("SELECT name, emoji FROM tags")
+            && let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+        {
+            for (name, emoji) in rows.flatten() {
+                emoji_map.insert(name, emoji);
+            }
+        }
+
+        let mut list: Vec<(String, String, usize)> = counts
+            .into_iter()
+            .map(|(name, count)| {
+                let emoji = emoji_map
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_else(|| tag_emoji(&name).to_string());
+                (name, emoji, count)
+            })
+            .collect();
+
+        list.sort_by(|a, b| {
+            (a.0 == OTHER_TAG_SLUG)
+                .cmp(&(b.0 == OTHER_TAG_SLUG))
+                .then_with(|| b.2.cmp(&a.2))
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        list
+    }
+
+    pub fn get_memes_by_tags(
+        &self,
+        user_id: i64,
+        tags: &[String],
+        limit: usize,
+        media_filter: Option<MediaType>,
+    ) -> Vec<&Meme> {
+        let settings = self.get_user_settings(user_id);
+
+        self.memes
+            .iter()
+            .rev()
+            .filter(|m| {
+                !m.file_tg_id.is_empty()
+                    && m.is_visible_to(user_id, &settings.search_scope)
+                    && tags.iter().all(|tag| m.has_tag(tag))
+                    && media_filter.is_none_or(|f| m.media_type == f)
+            })
+            .take(limit)
+            .collect()
+    }
+
+    pub fn get_active_taxonomy(&self) -> Vec<DynamicTagDef> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT name, emoji, instruction
+             FROM tags
+             WHERE is_active = 1 AND name != ?
+             ORDER BY id ASC",
+        ) else {
+            return crate::tagger::default_taxonomy();
+        };
+
+        let Ok(rows) = stmt.query_map(params![OTHER_TAG_SLUG], |row| {
+            Ok(DynamicTagDef {
+                slug: row.get(0)?,
+                emoji: row.get(1)?,
+                instruction: row.get(2)?,
+            })
+        }) else {
+            return crate::tagger::default_taxonomy();
+        };
+
+        let defs: Vec<DynamicTagDef> = rows
+            .flatten()
+            .filter(|d| !d.instruction.trim().is_empty())
+            .collect();
+
+        if defs.is_empty() {
+            crate::tagger::default_taxonomy()
+        } else {
+            defs
+        }
+    }
+
+    pub fn add_dynamic_category(&mut self, def: &DynamicTagDef) -> Result<bool, String> {
+        let inserted = self
+            .conn
+            .execute(
+                "INSERT INTO tags (name, emoji, instruction, is_active)
+                 VALUES (?1, ?2, ?3, 1)
+                 ON CONFLICT(name) DO NOTHING",
+                params![def.slug, def.emoji, def.instruction],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(inserted > 0)
+    }
+
+    pub fn get_undetermined_memes_for_discovery(&self, limit: usize) -> Vec<DiscoverySample> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, ocr_text, description_uk, description_en, title
+             FROM memes
+             WHERE tags_version = ?
+             ORDER BY id DESC
+             LIMIT ?",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![TAGS_STATE_UNDETERMINED, limit as i64], |row| {
+            Ok(DiscoverySample {
+                id: row.get(0)?,
+                ocr_text: row.get(1)?,
+                description_uk: row.get(2)?,
+                description_en: row.get(3)?,
+                title: row.get(4)?,
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn mark_memes_tags_version(
+        &mut self,
+        meme_ids: &[u64],
+        tags_version: i64,
+    ) -> Result<(), String> {
+        if meme_ids.is_empty() {
+            return Ok(());
+        }
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        for meme_id in meme_ids {
+            tx.execute(
+                "UPDATE memes SET tags_version = ? WHERE id = ?",
+                params![tags_version, *meme_id as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 fn map_drip_subscription_row(row: &rusqlite::Row) -> rusqlite::Result<DripSubscription> {
@@ -1485,7 +1822,7 @@ fn score_candidates<'a>(
     memes: &'a [Meme],
     user_id: i64,
     scope_visible: &str,
-    media_filter: Option<MediaType>,
+    filter: SearchFilter<'_>,
     fts_hits: &HashMap<u64, FtsHit>,
 ) -> Vec<ScoredMeme<'a>> {
     let mut selected_memes: Vec<ScoredMeme<'a>> = Vec::with_capacity(memes.len());
@@ -1497,8 +1834,14 @@ fn score_candidates<'a>(
             continue;
         };
 
-        if let Some(filter) = media_filter
-            && meme.media_type != filter
+        if let Some(media) = filter.media
+            && meme.media_type != media
+        {
+            continue;
+        }
+
+        if !filter.tags.is_empty()
+            && !filter.tags.iter().all(|tag| meme.has_tag(tag))
         {
             continue;
         }
@@ -1534,6 +1877,7 @@ fn score_candidates<'a>(
     selected_memes
 }
 
+#[allow(clippy::too_many_arguments)]
 fn find_top_k_impl<'a>(
     query: &[f32],
     query_text: &str,
@@ -1541,7 +1885,7 @@ fn find_top_k_impl<'a>(
     app_config: &AppConfig,
     user_id: i64,
     scope_visible: String,
-    media_filter: Option<MediaType>,
+    filter: SearchFilter<'_>,
     fts_hits: &HashMap<u64, FtsHit>,
 ) -> Vec<(&'a Meme, f32)> {
     let selected_memes = score_candidates(
@@ -1550,7 +1894,7 @@ fn find_top_k_impl<'a>(
         memes,
         user_id,
         &scope_visible,
-        media_filter,
+        filter,
         fts_hits,
     );
 
@@ -1666,6 +2010,7 @@ mod tests {
             phash,
             media_type: MediaType::Photo,
             thumbnail_tg_id: String::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -1818,7 +2163,7 @@ mod tests {
             &cfg,
             1,
             "all".to_string(),
-            None,
+            SearchFilter::default(),
             &fts_hits,
         );
 
@@ -1854,7 +2199,7 @@ mod tests {
             &cfg,
             1,
             "all".to_string(),
-            None,
+            SearchFilter::default(),
             &fts_hits,
         );
 
@@ -1937,7 +2282,14 @@ mod tests {
         );
 
         let query_vec = vec![1.0, 0.0];
-        let results = store.find_top_k(&query_vec, "кіт дедлайн", &cfg, 1, "all".to_string(), None);
+        let results = store.find_top_k(
+            &query_vec,
+            "кіт дедлайн",
+            &cfg,
+            1,
+            "all".to_string(),
+            SearchFilter::default(),
+        );
 
         assert!(!results.is_empty());
         assert_eq!(results[0].0.id, 1);
@@ -1990,7 +2342,7 @@ mod tests {
             &cfg,
             1,
             "all".to_string(),
-            None,
+            SearchFilter::default(),
             &empty_fts,
         );
 
@@ -2031,7 +2383,7 @@ mod tests {
             &cfg,
             1,
             "all",
-            None,
+            SearchFilter::default(),
             15,
         );
 
@@ -2193,5 +2545,87 @@ mod tests {
         // Pause subscription -> excluded from due subscriptions
         store.set_drip_active(user_id, false).unwrap();
         assert!(store.get_due_drip_subscriptions(1000).is_empty());
+    }
+
+    #[test]
+    fn tags_persist_count_and_filter_search_candidates() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        let cfg = make_test_config(3);
+
+        let initial_taxonomy = store.get_active_taxonomy();
+        assert_eq!(initial_taxonomy.len(), TAG_TAXONOMY.len());
+        assert!(!initial_taxonomy.iter().any(|t| t.slug == OTHER_TAG_SLUG));
+
+        let custom_tag = DynamicTagDef {
+            slug: "авто".to_string(),
+            emoji: "🚗".to_string(),
+            instruction: "Does this meme relate to cars or driving?".to_string(),
+        };
+        assert!(store.add_dynamic_category(&custom_tag).unwrap());
+        assert!(!store.add_dynamic_category(&custom_tag).unwrap());
+        assert_eq!(store.get_active_taxonomy().len(), TAG_TAXONOMY.len() + 1);
+
+        seed_memory_meme(&mut store, 1, "баг в прод", "Програміст плаче", "Dev crying", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "мавпа кодить", "Мавпа за ноутбуком", "Monkey coding", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "трек грає", "Незрозумілий мем", "Misc meme", "", vec![1.0, 0.0]);
+
+        store
+            .set_meme_tags(1, &[("айті".to_string(), 0.95), ("робота".to_string(), 0.85)], 1)
+            .unwrap();
+        store
+            .set_meme_tags(2, &[("мавпи".to_string(), 0.96), ("айті".to_string(), 0.91)], 1)
+            .unwrap();
+        store
+            .set_meme_tags(
+                3,
+                &[(OTHER_TAG_SLUG.to_string(), 0.78)],
+                TAGS_STATE_UNDETERMINED,
+            )
+            .unwrap();
+
+        assert_eq!(store.get_tagging_progress(1), (3, 3));
+        assert!(store.get_memes_for_tagging(1, 10).is_empty());
+
+        let undetermined = store.get_undetermined_memes_for_discovery(10);
+        assert_eq!(undetermined.len(), 1);
+        assert_eq!(undetermined[0].id, 3);
+
+        store
+            .mark_memes_tags_version(&[3], crate::constants::TAGS_STATE_REVIEWED_OTHER)
+            .unwrap();
+        assert!(store.get_undetermined_memes_for_discovery(10).is_empty());
+        assert_eq!(store.get_tagging_progress(1), (3, 3));
+
+        let counts = store.get_tag_counts(1);
+        assert_eq!(counts.last().map(|(n, _, _)| n.as_str()), Some(OTHER_TAG_SLUG));
+        assert_eq!(
+            counts,
+            vec![
+                ("айті".to_string(), "💻".to_string(), 2),
+                ("мавпи".to_string(), "🐒".to_string(), 1),
+                ("робота".to_string(), "💼".to_string(), 1),
+                (OTHER_TAG_SLUG.to_string(), OTHER_TAG_EMOJI.to_string(), 1),
+            ]
+        );
+
+        let multi_tags = vec!["мавпи".to_string(), "айті".to_string()];
+        let by_tags = store.get_memes_by_tags(1, &multi_tags, 10, None);
+        assert_eq!(by_tags.len(), 1);
+        assert_eq!(by_tags[0].id, 2);
+
+        let query_vec = vec![1.0, 0.0];
+        let filtered = store.find_top_k(
+            &query_vec,
+            "мем",
+            &cfg,
+            1,
+            "all".to_string(),
+            SearchFilter {
+                media: None,
+                tags: &multi_tags,
+            },
+        );
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].0.id, 2);
     }
 }

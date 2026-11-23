@@ -8,6 +8,7 @@ mod maintenance;
 mod meme_store;
 mod migrations;
 mod reranker;
+mod tagger;
 mod vlm;
 mod worker;
 
