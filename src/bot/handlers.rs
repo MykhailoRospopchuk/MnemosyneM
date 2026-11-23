@@ -12,7 +12,7 @@ use teloxide::prelude::*;
 use teloxide::types::{
     Animation, FileId, InlineQueryResult, InlineQueryResultCachedMpeg4Gif,
     InlineQueryResultCachedPhoto, InputFile, InputMedia, InputMediaPhoto, Message, MessageOrigin,
-    PhotoSize,
+    PhotoSize, ReplyParameters,
 };
 use tokio::sync::mpsc::Sender;
 
@@ -67,6 +67,7 @@ async fn enqueue_meme_job(
                 msg.chat.id,
                 format!("[V] This {} already in your collection!", label),
             )
+            .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
             .await?;
             return Ok(());
         }
@@ -75,6 +76,7 @@ async fn enqueue_meme_job(
                 msg.chat.id,
                 format!("[V] We know your {}! Collected!", label),
             )
+            .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
             .await?;
             return Ok(());
         }
@@ -88,6 +90,7 @@ async fn enqueue_meme_job(
 
     let job = MemeJob {
         chat_id: msg.chat.id,
+        message_id: msg.id,
         file_id: payload.file_id,
         file_unique_id: payload.file_unique_id,
         captions: caption,
@@ -102,6 +105,7 @@ async fn enqueue_meme_job(
     if let Err(e) = sender.send(job).await {
         eprintln!("[{}]-[ERROR] Queue error: {}", log_tag, e);
         bot.send_message(msg.chat.id, "Queue is full, please try again later!")
+            .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
             .await?;
         return Ok(());
     }
@@ -169,7 +173,20 @@ async fn run_search(
         None
     };
 
-    let Some(reranker) = reranker else {
+    let rerank_permit = match reranker.as_ref() {
+        Some(_) => match state.rerank_semaphore.clone().try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(_) => {
+                eprintln!(
+                    "[RERANK]-[WARN] Reranker queue busy; falling back to fast Phase 1A search."
+                );
+                None
+            }
+        },
+        None => None,
+    };
+
+    let (Some(reranker), Some(_permit)) = (reranker, rerank_permit) else {
         let mut engine = state.engine.lock().await;
         let meme_store = state.meme_store.lock().await;
         let results = meme_store

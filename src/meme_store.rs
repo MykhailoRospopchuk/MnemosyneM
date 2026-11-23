@@ -1347,7 +1347,7 @@ mod tests {
             auto_reprocess: false,
             enable_reranker: false,
             rerank_inline: false,
-            rerank_min_score: 0.005,
+            rerank_min_score: 0.15,
             rerank_candidates: 10,
         }
     }

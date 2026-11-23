@@ -6,7 +6,7 @@ pub struct RerankerEngine {
 
 impl RerankerEngine {
     pub fn new() -> Result<Self, String> {
-        let options = RerankInitOptions::new(RerankerModel::BGERerankerV2M3)
+        let options = RerankInitOptions::new(RerankerModel::JINARerankerV2BaseMultiligual)
             .with_max_length(256)
             .with_show_download_progress(true);
         let model = TextRerank::try_new(options).map_err(|e| e.to_string())?;
@@ -54,7 +54,7 @@ pub fn filter_reranked(
     }
 
     let relative_floor = if top1 >= 0.70 {
-        (top1 * 0.10).max(min_score)
+        (top1 * 0.25).max(min_score)
     } else {
         min_score
     };
@@ -79,15 +79,15 @@ mod tests {
 
     #[test]
     fn filter_reranked_rejects_noise_and_trims_weak_tail() {
-        // Pure noise below BGE threshold (e.g. ~1e-5) -> empty
-        assert!(filter_reranked(vec![(0, 0.0002), (1, 0.00002)], 0.005, 3).is_empty());
+        // Off-topic noise on Jina (~0.04..0.12) below 0.15 floor -> empty
+        assert!(filter_reranked(vec![(0, 0.12), (1, 0.04)], 0.15, 3).is_empty());
 
-        // Strong top1 (>= 0.70) drops weak tail (< 0.90 * 0.10 = 0.09)
-        let kept = filter_reranked(vec![(2, 0.90), (0, 0.20), (1, 0.05)], 0.005, 3);
-        assert_eq!(kept, vec![(2, 0.90), (0, 0.20)]);
+        // Strong top1 (>= 0.70) keeps thematic matches (>= 0.80 * 0.25 = 0.20) and drops weak tail
+        let kept = filter_reranked(vec![(2, 0.80), (0, 0.30), (1, 0.16)], 0.15, 3);
+        assert_eq!(kept, vec![(2, 0.80), (0, 0.30)]);
 
-        // Short relevant query (e.g. 0.017) passes 0.005 floor while noise (0.00002) is dropped
-        let short_query = filter_reranked(vec![(0, 0.017), (1, 0.00002)], 0.005, 3);
-        assert_eq!(short_query, vec![(0, 0.017)]);
+        // Short relevant query (e.g. 0.22) passes 0.15 floor while noise (0.04) is dropped
+        let short_query = filter_reranked(vec![(0, 0.22), (1, 0.04)], 0.15, 3);
+        assert_eq!(short_query, vec![(0, 0.22)]);
     }
 }

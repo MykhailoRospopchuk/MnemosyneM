@@ -3,8 +3,8 @@ use std::sync::OnceLock;
 
 const TOP_K: usize = 3;
 const MAX_PHASH_DISTANCE: u32 = 5;
-const RERANK_MIN_SCORE: f32 = 0.005;
-const RERANK_CANDIDATES: usize = 10;
+const RERANK_MIN_SCORE: f32 = 0.15;
+const RERANK_CANDIDATES: usize = 5;
 
 pub struct AppConfig {
     pub db_path: String,

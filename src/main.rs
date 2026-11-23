@@ -11,17 +11,21 @@ mod reranker;
 mod vlm;
 mod worker;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Instant};
 
 use teloxide::Bot;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 
 use crate::{maintenance::maintance_worker, meme_store::MemeStore};
+
+const MAX_CONCURRENT_RERANK_SLOTS: usize = 2;
 
 struct AppState {
     meme_store: Mutex<MemeStore>,
     engine: Mutex<engine::ClipEngine>,
     reranker: Option<Arc<std::sync::Mutex<reranker::RerankerEngine>>>,
+    rerank_semaphore: Arc<Semaphore>,
+    started_at: Instant,
     last_inline_query: Mutex<HashMap<i64, String>>,
 }
 
@@ -39,7 +43,7 @@ async fn main() {
     let store = MemeStore::open(&app_config.db_path).expect("Failed to open database");
 
     let reranker = if app_config.enable_reranker {
-        println!("Loading Stage-2 reranker (BGERerankerV2M3)...");
+        println!("Loading Stage-2 reranker (JINARerankerV2BaseMultiligual)...");
         match reranker::RerankerEngine::new() {
             Ok(r) => {
                 println!("Stage-2 reranker loaded.");
@@ -62,6 +66,8 @@ async fn main() {
         meme_store: Mutex::new(store),
         engine: Mutex::new(engine),
         reranker,
+        rerank_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RERANK_SLOTS)),
+        started_at: Instant::now(),
         last_inline_query: Mutex::new(HashMap::new()),
     });
 

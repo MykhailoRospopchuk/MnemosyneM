@@ -588,15 +588,15 @@ Meme ID: 1793041234
     - [x] **Phase 1A (Hybrid Stage-1 Candidate Generation):**
       - [x] Add SQLite FTS5 migration (`memes_fts` virtual table) indexing normalized/lightly-stemmed `ocr_text`, `description_uk`, `description_en`, and clean `title` (closing the current gap where `count_lexical_matches` scans `ocr_text` only), kept in sync on inserts/updates.
       - [x] Build unified Stage-1 candidate pool (`Top-20 Vector ∪ Top-20 FTS5`) without equal-weight RRF.
-    - [x] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local `BGERerankerV2M3`):**
-      - [x] Add `RerankerEngine` (`src/reranker.rs`) with `fastembed::TextRerank` (`BGERerankerV2M3`, `max_length=256`), `sigmoid(logit)` probability calibration, and `filter_reranked` noise/tail cutoff.
+    - [x] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local `JINARerankerV2BaseMultiligual`):**
+      - [x] Add `RerankerEngine` (`src/reranker.rs`) with `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual`, `max_length=256`), `sigmoid(logit)` probability calibration, and `filter_reranked` noise/tail cutoff.
       - [x] Integrate Stage-2 reranker cleanly outside `meme_store`/`engine` mutexes via `tokio::task::spawn_blocking` (`run_search` in `src/bot/handlers.rs`) with `ENABLE_RERANKER` / `RERANK_MIN_SCORE` / `RERANK_CANDIDATES` config and automatic fallback to Phase 1A.
     - [ ] **Phase 2 (Evaluation & Long-Term Scaling):**
       - [ ] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
       - [ ] Evaluate structured 3-vector blending (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
-  - [ ] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
+  - [x] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
-  - [ ] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
+  - [x] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
   - [ ] Meme Drip Delivery (Рандомайзер мемів / «Дофамінова підписка»):
     - [ ] SQLite tables `meme_subscriptions` and `user_delivered_memes`.
     - [ ] Background Tokio scheduler with randomized Jitter intervals and Quiet Hours (`23:00` – `09:00`).
@@ -607,9 +607,9 @@ Meme ID: 1793041234
     - [ ] Add user context (`user_id`, `@username`, `chat_id`) to photo ingestion, queue worker, and search queries.
     - [ ] Configure log-level filtering (`INFO`, `WARN`, `ERROR`, `DEBUG`) via `RUST_LOG` environment variable.
   - [ ] In-process runtime resource metrics & health dashboard (`/stats`):
-    - [ ] Measure process memory (RSS / Virtual RAM via `/proc/self/statm` on Linux).
-    - [ ] Track bot process uptime (`Instant::now().elapsed()`).
-    - [ ] Report live MPSC queue backlog depth and SQLite DB file size.
+    - [x] Measure process memory (RSS / Virtual RAM via `/proc/self/statm` on Linux).
+    - [x] Track bot process uptime (`Instant::now().elapsed()`).
+    - [x] Report live MPSC queue backlog depth and SQLite DB file size.
     - [ ] Track Gemini Free Tier quotas consumed (RPD counter & RPM pacing).
     - [ ] Measure vector search execution latency (ms) and FastEmbed inference time.
   - [ ] Automatic meme categorization & Hashtag directory (`/tags`):
@@ -623,10 +623,9 @@ Meme ID: 1793041234
     - [ ] Interactive `/tinder` UI: send photo with single-row layout: equal-sized `[ ❤️ Лайк ]` & `[ ⏭️ Скіп ]` and smaller `[ 👎 ]` in the middle.
     - [ ] Zero chat spam: update next meme in-place via `edit_message_media`.
     - [ ] Decouple Likes from Personal Collection: likes populate `/liked` feed without cluttering personal `user_memes`.
-  - [ ] Persistent Reply Keyboard (`KeyboardMarkup`):
-    - [ ] Build multi-row keyboard with `resize_keyboard(true)` and `persistent()` for one-tap thumb navigation.
-    - [ ] Buttons: `🔥 Мем-Тіндер`, `🎲 Випадковий мем`, `❤️ Вподобані`, `🏷️ Теги/Категорії`, `⚙️ Налаштування`, `📊 Статистика`.
-    - [ ] Map button text directly into bot command dispatcher.
+  - [x] Persistent Reply Keyboard (`KeyboardMarkup`):
+    - [x] Build multi-row keyboard with `resize_keyboard()` and `persistent()` for one-tap thumb navigation.
+    - [x] Map button text directly into bot command dispatcher (`🎲 Випадковий мем`, `📊 Статистика`, `⚙️ Налаштування`, `❓ Допомога`; expand with Tinder/Liked/Tags as those ship).
   - [x] GIF & Video Animation Support (`media_type: MediaType::Animation`):
     - [x] Telegram `Message::Animation` ingestion handler in `bot/handlers.rs`.
     - [x] Gemini VLM MP4 multimodal video analysis (`inline_data` with `video/mp4`).

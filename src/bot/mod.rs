@@ -6,11 +6,13 @@ use crate::config::AppConfig;
 use crate::database::enums::command_enum::Command;
 use crate::worker::MemeJob;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::Message;
 use teloxide::types::User;
+use teloxide::update_listeners;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc::Sender;
 
@@ -53,11 +55,26 @@ pub async fn run_bot(
         .branch(Update::filter_callback_query().endpoint(callback_handler))
         .branch(Update::filter_inline_query().endpoint(inline_query_handler));
 
+    let polling = update_listeners::polling_default(bot.clone()).await;
+    let consecutive_errors = Arc::new(AtomicU32::new(0));
+    let polling_error_handler = Arc::new(move |err| {
+        let counter = Arc::clone(&consecutive_errors);
+        async move {
+            let streak = counter.fetch_add(1, Ordering::Relaxed) + 1;
+            let backoff_secs = (streak as u64 * 3).min(30);
+            eprintln!(
+                "[BOT]-[ERROR] Telegram polling error (streak={}): {:?}. Backing off {}s...",
+                streak, err, backoff_secs
+            );
+            tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+        }
+    });
+
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![state, sender, app_config])
         .enable_ctrlc_handler()
         .build()
-        .dispatch()
+        .dispatch_with_listener(polling, polling_error_handler)
         .await;
 }
 
@@ -88,7 +105,7 @@ pub async fn message_handler(
                     comand::help(bot, msg).await?;
                 }
                 Ok(Command::Stats) => {
-                    comand::stats(bot, msg, state).await?;
+                    comand::stats(bot, msg, state, app_config, &sender).await?;
                 }
                 Ok(Command::Random) => {
                     comand::random(bot, msg, state).await?;
@@ -101,6 +118,26 @@ pub async fn message_handler(
                 }
             }
             return Ok(());
+        }
+
+        match text.trim() {
+            comand::BTN_RANDOM => {
+                comand::random(bot, msg, state).await?;
+                return Ok(());
+            }
+            comand::BTN_STATS => {
+                comand::stats(bot, msg, state, app_config, &sender).await?;
+                return Ok(());
+            }
+            comand::BTN_SETTINGS => {
+                comand::settings(bot, msg, state).await?;
+                return Ok(());
+            }
+            comand::BTN_HELP => {
+                comand::help(bot, msg).await?;
+                return Ok(());
+            }
+            _ => {}
         }
 
         handlers::handle_search(&bot, &msg, text, &state, app_config).await?;

@@ -11,12 +11,18 @@ use crate::{
     AppState,
     helpers::hash_helper::{compute_hash, extract_frame_from_video},
 };
-use teloxide::{Bot, requests::Requester, types::ChatId};
+use teloxide::{
+    Bot,
+    payloads::SendMessageSetters,
+    requests::Requester,
+    types::{ChatId, MessageId, ReplyParameters},
+};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 #[derive(Clone, Debug)]
 pub struct MemeJob {
     pub chat_id: ChatId,
+    pub message_id: MessageId,
     pub file_id: String,
     pub file_unique_id: String,
     pub captions: String,
@@ -26,6 +32,13 @@ pub struct MemeJob {
     pub source_url: String,
     pub media_type: MediaType,
     pub thumbnail_file_id: Option<String>,
+}
+
+async fn reply_to_job(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: impl Into<String>) {
+    let _ = bot
+        .send_message(chat_id, text)
+        .reply_parameters(ReplyParameters::new(message_id).allow_sending_without_reply())
+        .await;
 }
 
 pub fn start_worker(
@@ -53,12 +66,13 @@ pub fn start_worker(
                         "[WORKER]-[ERROR] Failed to download file after retries: {}",
                         e
                     );
-                    let _ = bot
-                        .send_message(
-                            job.chat_id,
-                            format!("[X] Failed to download media from Telegram: {}", e),
-                        )
-                        .await;
+                    reply_to_job(
+                        &bot,
+                        job.chat_id,
+                        job.message_id,
+                        format!("[X] Failed to download media from Telegram: {}", e),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -88,15 +102,13 @@ pub fn start_worker(
                                     "[WORKER]-[ERROR] Failed to download thumbnail after retries: {}",
                                     e
                                 );
-                                let _ = bot
-                                    .send_message(
-                                        job.chat_id,
-                                        format!(
-                                            "[X] Failed to download media from Telegram: {}",
-                                            e
-                                        ),
-                                    )
-                                    .await;
+                                reply_to_job(
+                                    &bot,
+                                    job.chat_id,
+                                    job.message_id,
+                                    format!("[X] Failed to download media from Telegram: {}", e),
+                                )
+                                .await;
                             }
                         };
                     }
@@ -145,7 +157,7 @@ pub fn start_worker(
                                 "[E] Already exist in your collection"
                             };
 
-                            let _ = bot.send_message(job.chat_id, text).await;
+                            reply_to_job(&bot, job.chat_id, job.message_id, text).await;
                         }
                         Err(e) => {
                             eprintln!("[WORKER]-[ERROR] Failed to ling duplicate meme: {}", e)
@@ -173,11 +185,16 @@ pub fn start_worker(
                         "[WORKER SECURITY ALERT] Inappropriate meme rejected: {}",
                         reason
                     );
-                    let _ = bot.send_message(
-                            job.chat_id,
-                            format!("[X] [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!", reason),
-                        )
-                        .await;
+                    reply_to_job(
+                        &bot,
+                        job.chat_id,
+                        job.message_id,
+                        format!(
+                            "[X] [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!",
+                            reason
+                        ),
+                    )
+                    .await;
                     tokio::time::sleep(Duration::from_secs(4)).await;
                     continue;
                 }
@@ -199,12 +216,13 @@ pub fn start_worker(
                             "[WORKER] Max retries reached for {}. Dropping task.",
                             job.file_unique_id
                         );
-                        let _ = bot
-                            .send_message(
-                                job.chat_id,
-                                format!("[X] AI could not analyze meme: {}", e),
-                            )
-                            .await;
+                        reply_to_job(
+                            &bot,
+                            job.chat_id,
+                            job.message_id,
+                            format!("[X] AI could not analyze meme: {}", e),
+                        )
+                        .await;
                     }
                     tokio::time::sleep(Duration::from_secs(4)).await;
                     continue;
@@ -222,40 +240,49 @@ pub fn start_worker(
                 job.captions
             };
 
-            let mut engine = state.engine.lock().await;
-            let mut meme_store = state.meme_store.lock().await;
+            let save_result = {
+                let mut engine = state.engine.lock().await;
+                let mut meme_store = state.meme_store.lock().await;
 
-            match meme_store.add_from_analysis(
-                NewMeme {
-                    id,
-                    title: user_title,
-                    analysis: &analysis,
-                    file_tg_id: job.file_id,
-                    file_tg_unique_id: job.file_unique_id,
-                    user_id: job.user_id,
-                    source_title: job.source_title,
-                    source_url: job.source_url,
-                    phash,
-                    media_type: job.media_type,
-                    thumbnail_tg_id: job.thumbnail_file_id.unwrap_or_default(),
-                    vlm_version: constants::CURRENT_VLM_VERSION,
-                },
-                &mut engine,
-            ) {
+                meme_store.add_from_analysis(
+                    NewMeme {
+                        id,
+                        title: user_title,
+                        analysis: &analysis,
+                        file_tg_id: job.file_id,
+                        file_tg_unique_id: job.file_unique_id,
+                        user_id: job.user_id,
+                        source_title: job.source_title,
+                        source_url: job.source_url,
+                        phash,
+                        media_type: job.media_type,
+                        thumbnail_tg_id: job.thumbnail_file_id.unwrap_or_default(),
+                        vlm_version: constants::CURRENT_VLM_VERSION,
+                    },
+                    &mut engine,
+                )
+            };
+
+            match save_result {
                 Ok(()) => {
                     println!("[WORKER] Sucessfully saved in SQLite!");
-                    let _ = bot
-                        .send_message(
-                            job.chat_id,
-                            "[V] Your meme has been confiscated...".to_string(),
-                        )
-                        .await;
+                    reply_to_job(
+                        &bot,
+                        job.chat_id,
+                        job.message_id,
+                        "[V] Your meme has been confiscated...",
+                    )
+                    .await;
                 }
                 Err(e) => {
                     eprintln!("[WORKER]-[ERROR] DB error SQLite: {}", e);
-                    let _ = bot
-                        .send_message(job.chat_id, format!("[X] Walter we lost it... {}", e))
-                        .await;
+                    reply_to_job(
+                        &bot,
+                        job.chat_id,
+                        job.message_id,
+                        format!("[X] Walter we lost it... {}", e),
+                    )
+                    .await;
                 }
             }
 
