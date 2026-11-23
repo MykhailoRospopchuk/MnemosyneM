@@ -1,6 +1,6 @@
 # VLM Quota-Aware Model Router & Circuit Breaker — Implementation Plan
 
-> **Status:** Planned (`src/` untouched)
+> **Status:** Implemented across `src/vlm.rs`, `src/migrations.rs`, `src/meme_store.rs`, `src/main.rs`, `src/worker.rs`, `src/maintenance/maintance_worker.rs`, and `src/bot/comand.rs` (`/stats`)
 > **Goal:** Stop hammering exhausted/dead Gemini models on every meme, balance load evenly across high-quota Tier-1 models (`3.5-flash-lite` + `3.1-flash-lite` = 1,000 RPD / 30 RPM combined), and automatically fail over cleanly using structured HTTP `429` feedback and persisted cooldowns.
 
 ---

@@ -29,6 +29,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_user_reactions_table(&mut conn)?;
     add_drip_subscription_tables(&mut conn)?;
     add_tags_tables(&mut conn)?;
+    add_vlm_model_quota_table(&mut conn)?;
 
     Ok(())
 }
@@ -549,6 +550,51 @@ fn add_tags_tables(conn: &mut Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_meme_tags_tag_id
             ON meme_tags(tag_id, meme_id);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    info!(migration = %migration_name, "Migration finished successfully");
+    Ok(())
+}
+
+fn add_vlm_model_quota_table(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795458000_add_vlm_model_quota_table";
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    info!(migration = %migration_name, "Creating vlm_model_quota table");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS vlm_model_quota (
+            model_id TEXT PRIMARY KEY,
+            pt_day_key TEXT NOT NULL,
+            used_today INTEGER NOT NULL DEFAULT 0,
+            cooldown_until INTEGER NOT NULL DEFAULT 0,
+            last_reason TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL
+        );
         ",
     )
     .map_err(|e| e.to_string())?;

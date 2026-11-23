@@ -567,12 +567,12 @@ Meme ID: 1793041234
   - [x] Dual Multilingual Embeddings: separate Ukrainian & English vector spaces with OCR exact keyword boosting.
   - [x] Standalone Database Migrations Engine (`src/migrations.rs`) with atomic batching & `_migrations` tracking.
   - [x] Multi-Model VLM Fallback Pool (`GEMINNI_MODEL_POOL`): automated failover across `3.5-flash-lite`, `3.1-flash-lite`, `3.5-flash`, `3.6-flash`, `3.8-flash` on 503/429 spikes.
-  - [ ] **⚡ Quota-Aware VLM Model Router & Circuit Breaker (see [docs/vlm-quota-router-plan.md](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/docs/vlm-quota-router-plan.md)):**
-    - [ ] Verify exact Gemini API model IDs via `GET /v1beta/models` (remove dead/missing models like `gemini-3.5-flash`, add `gemini-2.5-flash-lite`, `gemini-3-flash`, `gemini-2.5-flash`, `gemini-4-hydrogen`).
-    - [ ] Replace static `GEMINNI_MODEL_POOL` iteration with `VlmRouter`: separate Tier-1 (`500 RPD`: `3.5-flash-lite`, `3.1-flash-lite`) from Tier-2 (`20 RPD`), load-balancing Tier-1 by highest estimated remaining RPD % and lowest 60s RPM usage.
-    - [ ] Parse `429` JSON `QuotaFailure` (`PerDay` ➔ cooldown until midnight PT + 5m buffer) and `RetryInfo.retryDelay` (`PerMinute`/TPM ➔ short cooldown); disable `404`/`403` models and continue failover loop instead of returning early.
-    - [ ] Reuse a single shared `reqwest::Client` in `VlmRouter`, log the actual chosen model (`used_today/rpd_limit`), and release mutex locks strictly before `.await`.
-    - [ ] Persist per-model PT-day usage & cooldowns in SQLite (`vlm_model_quota`) via `src/migrations.rs` and share `Arc<VlmRouter>` across `worker.rs` and `maintance_worker.rs`.
+  - [x] **⚡ Quota-Aware VLM Model Router & Circuit Breaker (see [docs/vlm-quota-router-plan.md](file:///home/mykhailo/dev/pet/MnemosyneM/m_nemosyne_m/docs/vlm-quota-router-plan.md)):**
+    - [x] Verify exact Gemini API model IDs via `GET /v1beta/models` + live probes (keep verified free-tier pool: Tier-1 `3.5-flash-lite`, `3.1-flash-lite`; Tier-2 `3-flash-preview`, `3.6-flash`, `3.8-flash`, `4-hydrogen`; drop retired `2.5-*` and duplicate alias `3.5-flash`).
+    - [x] Replace static `GEMINNI_MODEL_POOL` iteration with `VlmRouter`: separate Tier-1 (`500 RPD`: `3.5-flash-lite`, `3.1-flash-lite`) from Tier-2 (`20 RPD`), load-balancing Tier-1 by highest estimated remaining RPD % and lowest 60s RPM usage.
+    - [x] Parse `429` JSON `QuotaFailure` (`PerDay` ➔ cooldown until midnight PT + 5m buffer) and `RetryInfo.retryDelay` (`PerMinute`/TPM ➔ short cooldown); disable `404`/`403` models and continue failover loop instead of returning early.
+    - [x] Reuse a single shared `reqwest::Client` in `VlmRouter`, log the actual chosen model (`used_today/rpd_limit`), and release mutex locks strictly before `.await`.
+    - [x] Persist per-model PT-day usage & cooldowns in SQLite (`vlm_model_quota`) via `src/migrations.rs` and share `Arc<VlmRouter>` across `worker.rs` and `maintance_worker.rs`.
   - [x] Progressive backoff and retry queue (5s, 10s) on transient VLM errors with sender requeue.
   - [x] Markdown code fence cleanup (`clean_json`) and Serde field aliases in VLM response parser.
   - [x] Worker image download retry loop with backoff on Telegram network resets.
@@ -591,11 +591,11 @@ Meme ID: 1793041234
     - [x] **Phase 1B (Stage-2 Reranking & Calibrated Validation — Local `JINARerankerV2BaseMultiligual`):**
       - [x] Add `RerankerEngine` (`src/reranker.rs`) with `fastembed::TextRerank` (`JINARerankerV2BaseMultiligual`, `max_length=256`), `sigmoid(logit)` probability calibration, and `filter_reranked` noise/tail cutoff.
       - [x] Integrate Stage-2 reranker cleanly outside `meme_store`/`engine` mutexes via `tokio::task::spawn_blocking` (`run_search` in `src/bot/handlers.rs`) with `ENABLE_RERANKER` / `RERANK_MIN_SCORE` / `RERANK_CANDIDATES` config and automatic fallback to Phase 1A.
-    - [ ] **Phase 2 (Evaluation & Long-Term Scaling):**
-      - [ ] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
+    - [x] **Phase 2 (Evaluation & Long-Term Scaling):**
+      - [x] Add reproducible golden search evaluation test suite (`standard`, `syn_zero`, `NEGATIVE` queries tracking `Hit@3` and `MRR`).
       - [ ] Evaluate structured 3-vector blending (`holistic + scene + meaning`) or `Bgem3Model::BGEM3Q` (Dense + Sparse) as corpus grows.
   - [x] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
-  - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
+  - [x] Per-meme privacy toggles (`Make Public` / `Keep Private` + `Delete` confirmation on uploaded meme message).
   - [x] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
   - [x] Meme Drip Delivery (Рандомайзер мемів / «Дофамінова підписка»):
     - [x] SQLite tables `meme_subscriptions` and `user_delivered_memes`.
@@ -606,12 +606,12 @@ Meme ID: 1793041234
     - [x] Add UTC timestamps to every log line to track when actions happen.
     - [x] Add user context (`user_id`, `@username`, `chat_id`) to photo ingestion, queue worker, and search queries.
     - [x] Configure log-level filtering (`INFO`, `WARN`, `ERROR`, `DEBUG`) via `RUST_LOG` environment variable.
-  - [ ] In-process runtime resource metrics & health dashboard (`/stats`):
+  - [x] In-process runtime resource metrics & health dashboard (`/stats`):
     - [x] Measure process memory (RSS / Virtual RAM via `/proc/self/statm` on Linux).
     - [x] Track bot process uptime (`Instant::now().elapsed()`).
     - [x] Report live MPSC queue backlog depth and SQLite DB file size.
-    - [ ] Track Gemini Free Tier quotas consumed (RPD counter & RPM pacing).
-    - [ ] Measure vector search execution latency (ms) and FastEmbed inference time.
+    - [x] Track Gemini Free Tier quotas consumed (PT RPD counters per tier & model).
+    - [x] Measure vector search execution latency (ms: embed, Stage-1, rerank, total).
   - [x] Automatic meme categorization & Hashtag directory (`/tags`):
     - [x] Use **`gemini-decision-1`** (`POST /v1beta/decisions`) batch `noul` checks against a fixed normalized taxonomy (30–100 categories in 1 call over `ocr_text + description_uk` — zero text-generation tag drift, fits within `10K RPD` backfill).
     - [x] Create SQLite tables `tags (id, name UNIQUE)` and `meme_tags (meme_id, tag_id)`.
@@ -637,7 +637,7 @@ Meme ID: 1793041234
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
   - [x] Nuanced NSFW policy: strict photographic nudity protection with explicit cultural art/medieval illustration exemptions.
-  - [ ] Add `gemini-decision-1` pre-ingestion safety & spam gate (`noul`/`score` on `10K RPD` quota before calling `Flash Lite`, preventing comic false positives and returning calibrated `safety_score`).
+  - [x] Add `gemini-decision-1` pre-ingestion safety & spam gate (`noul` on `10K RPD` quota before calling `Flash Lite`, preventing comic false positives and saving generative quota).
   - [ ] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**

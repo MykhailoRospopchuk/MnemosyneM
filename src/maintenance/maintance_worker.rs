@@ -14,7 +14,6 @@ use crate::database::enums::vlm_error_enum::VlmError;
 use crate::helpers::embeding_helper::format_embedding_passage;
 use crate::helpers::telegram_bot_helper::download_telegram_file;
 use crate::tagger::{self, TagError};
-use crate::vlm;
 use crate::worker::MemeJob;
 use crate::{
     AppState,
@@ -167,7 +166,13 @@ async fn reprocess_vlm(
             }
         };
 
-        match vlm::describe_meme(&bytes, &app_config.gemini_api_key, mime_type).await {
+        let vlm_res = state
+            .vlm_router
+            .describe_meme(&bytes, &app_config.gemini_api_key, mime_type)
+            .await;
+        crate::persist_dirty_vlm_quotas(&state).await;
+
+        match vlm_res {
             Ok(analysis) => {
                 let passage_uk =
                     format_embedding_passage(&analysis.ocr_text, &analysis.uk_description);
@@ -218,6 +223,14 @@ async fn reprocess_vlm(
                 let _ = store.mark_meme_vlm_version(item.id, -CURRENT_VLM_VERSION);
                 skipped += 1;
             }
+            Err(VlmError::DailyQuotaExhausted(msg)) => {
+                warn!(
+                    meme_id = item.id,
+                    error = %msg,
+                    "All VLM models hit daily quota during reprocess; pausing until PT reset"
+                );
+                break;
+            }
             Err(VlmError::Transient(e)) => {
                 consecutive_transient += 1;
                 warn!(
@@ -233,7 +246,12 @@ async fn reprocess_vlm(
             }
         }
 
-        tokio::time::sleep(Duration::from_secs(5)).await;
+        let pace = state
+            .vlm_router
+            .recommended_worker_sleep()
+            .await
+            .max(Duration::from_secs(3));
+        tokio::time::sleep(pace).await;
     }
 
     if total == 0 {

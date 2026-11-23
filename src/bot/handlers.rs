@@ -191,6 +191,7 @@ async fn run_search(
     candidate_limit: usize,
     use_reranker: bool,
 ) -> Result<Vec<(Meme, f32)>, String> {
+    let t_total = Instant::now();
     let reranker = if use_reranker {
         state.reranker.as_ref().map(Arc::clone)
     } else {
@@ -211,31 +212,58 @@ async fn run_search(
         None => None,
     };
 
-    let (Some(reranker), Some(_permit)) = (reranker, rerank_permit) else {
+    let t_embed = Instant::now();
+    let query_vec = {
         let mut engine = state.engine.lock().await;
-        let meme_store = state.meme_store.lock().await;
-        let results = meme_store
-            .search_top_k(clean_query, &mut engine, app_config, user_id, filter)?
-            .into_iter()
-            .map(|(meme, score)| (meme.clone(), score))
-            .collect();
+        engine.embed_query(clean_query).map_err(|e| e.to_string())?
+    };
+    let embed_ms = t_embed.elapsed().as_millis() as u64;
+
+    let (Some(reranker), Some(_permit)) = (reranker, rerank_permit) else {
+        let t_stage1 = Instant::now();
+        let results = {
+            let meme_store = state.meme_store.lock().await;
+            let settings = meme_store.get_user_settings(user_id);
+            meme_store
+                .find_top_k(
+                    &query_vec,
+                    clean_query,
+                    app_config,
+                    user_id,
+                    settings.search_scope,
+                    filter,
+                )
+                .into_iter()
+                .map(|(meme, score)| (meme.clone(), score))
+                .collect()
+        };
+        let stage1_ms = t_stage1.elapsed().as_millis() as u64;
+        state
+            .search_metrics
+            .record(embed_ms, stage1_ms, 0, t_total.elapsed().as_millis() as u64);
         return Ok(results);
     };
 
+    let t_stage1 = Instant::now();
     let candidates = {
-        let mut engine = state.engine.lock().await;
         let meme_store = state.meme_store.lock().await;
-        meme_store.search_stage1_candidates(
+        let settings = meme_store.get_user_settings(user_id);
+        meme_store.stage1_candidates_from_embedding(
+            &query_vec,
             clean_query,
-            &mut engine,
             app_config,
             user_id,
+            &settings.search_scope,
             filter,
             candidate_limit,
-        )?
+        )
     };
+    let stage1_ms = t_stage1.elapsed().as_millis() as u64;
 
     if candidates.is_empty() {
+        state
+            .search_metrics
+            .record(embed_ms, stage1_ms, 0, t_total.elapsed().as_millis() as u64);
         return Ok(Vec::new());
     }
 
@@ -252,6 +280,14 @@ async fn run_search(
     })
     .await
     .map_err(|e| format!("Reranker task panicked: {}", e))??;
+    let rerank_ms = t0.elapsed().as_millis() as u64;
+
+    state.search_metrics.record(
+        embed_ms,
+        stage1_ms,
+        rerank_ms,
+        t_total.elapsed().as_millis() as u64,
+    );
 
     let top3_debug: Vec<String> = ranked
         .iter()
@@ -265,7 +301,9 @@ async fn run_search(
     info!(
         user_id,
         candidates = passage_count,
-        latency_ms = t0.elapsed().as_millis(),
+        embed_ms,
+        stage1_ms,
+        rerank_ms,
         top3 = %top3_debug.join(", "),
         "Stage-2 rerank completed"
     );

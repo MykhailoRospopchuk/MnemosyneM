@@ -6,7 +6,7 @@ use crate::{
         db_helper::upsert_fts_entry, embeding_helper::format_embedding_passage, lexical_helper,
     },
     tagger::{DiscoverySample, DynamicTagDef, OTHER_TAG_EMOJI, OTHER_TAG_SLUG, TAG_TAXONOMY, tag_emoji},
-    vlm::MemeAnalysis,
+    vlm::{MemeAnalysis, PersistedModelQuota},
 };
 use rusqlite::{Connection, params};
 use std::{
@@ -638,6 +638,15 @@ impl MemeStore {
 
             CREATE INDEX IF NOT EXISTS idx_meme_tags_tag_id
                 ON meme_tags(tag_id, meme_id);
+
+            CREATE TABLE IF NOT EXISTS vlm_model_quota (
+                model_id TEXT PRIMARY KEY,
+                pt_day_key TEXT NOT NULL,
+                used_today INTEGER NOT NULL DEFAULT 0,
+                cooldown_until INTEGER NOT NULL DEFAULT 0,
+                last_reason TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL
+            );
             ",
         )
         .map_err(|e| e.to_string())?;
@@ -946,49 +955,6 @@ impl MemeStore {
                 .take(limit)
                 .collect(),
         }
-    }
-
-    pub fn search_top_k<'a>(
-        &'a self,
-        query_text: &str,
-        engine: &mut ClipEngine,
-        app_config: &AppConfig,
-        user_id: i64,
-        filter: SearchFilter<'_>,
-    ) -> Result<Vec<(&'a Meme, f32)>, String> {
-        let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
-        let settings = self.get_user_settings(user_id);
-        let top_k = self.find_top_k(
-            &embed,
-            query_text,
-            app_config,
-            user_id,
-            settings.search_scope,
-            filter,
-        );
-        Ok(top_k)
-    }
-
-    pub fn search_stage1_candidates(
-        &self,
-        query_text: &str,
-        engine: &mut ClipEngine,
-        app_config: &AppConfig,
-        user_id: i64,
-        filter: SearchFilter<'_>,
-        candidate_limit: usize,
-    ) -> Result<Vec<Stage1Candidate>, String> {
-        let embed = engine.embed_query(query_text).map_err(|e| e.to_string())?;
-        let settings = self.get_user_settings(user_id);
-        Ok(self.stage1_candidates_from_embedding(
-            &embed,
-            query_text,
-            app_config,
-            user_id,
-            &settings.search_scope,
-            filter,
-            candidate_limit,
-        ))
     }
 
     pub fn stage1_candidates_from_embedding(
@@ -1994,6 +1960,60 @@ impl MemeStore {
         tx.commit().map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn load_vlm_quotas(&self) -> Vec<PersistedModelQuota> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT model_id, pt_day_key, used_today, cooldown_until, last_reason
+             FROM vlm_model_quota",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map([], |row| {
+            Ok(PersistedModelQuota {
+                model_id: row.get(0)?,
+                pt_day_key: row.get(1)?,
+                used_today: row.get::<_, i64>(2)?.max(0) as u32,
+                cooldown_until: row.get(3)?,
+                last_reason: row.get(4)?,
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn upsert_vlm_quota(&self, q: &PersistedModelQuota) -> Result<(), String> {
+        let updated_at = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+
+        self.conn
+            .execute(
+                "INSERT INTO vlm_model_quota (
+                    model_id, pt_day_key, used_today, cooldown_until, last_reason, updated_at
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(model_id) DO UPDATE SET
+                    pt_day_key = excluded.pt_day_key,
+                    used_today = excluded.used_today,
+                    cooldown_until = excluded.cooldown_until,
+                    last_reason = excluded.last_reason,
+                    updated_at = excluded.updated_at",
+                params![
+                    q.model_id,
+                    q.pt_day_key,
+                    i64::from(q.used_today),
+                    q.cooldown_until,
+                    q.last_reason,
+                    updated_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
 }
 
 fn map_drip_subscription_row(row: &rusqlite::Row) -> rusqlite::Result<DripSubscription> {
@@ -2987,5 +3007,196 @@ mod tests {
         assert_eq!(store.random_meme(1).unwrap().id, 2);
         store.record_reaction(1, 2, "dislike").unwrap();
         assert!(store.random_meme(1).is_none());
+    }
+
+    #[test]
+    fn vlm_model_quota_persists_roundtrip() {
+        let store = MemeStore::open(":memory:").unwrap();
+        let entry = PersistedModelQuota {
+            model_id: "gemini-3.5-flash-lite".to_string(),
+            pt_day_key: "2026-11-23".to_string(),
+            used_today: 42,
+            cooldown_until: 1_795_478_400,
+            last_reason: "daily_quota".to_string(),
+        };
+        store.upsert_vlm_quota(&entry).unwrap();
+
+        let updated = PersistedModelQuota {
+            used_today: 500,
+            ..entry.clone()
+        };
+        store.upsert_vlm_quota(&updated).unwrap();
+
+        let loaded = store.load_vlm_quotas();
+        assert_eq!(loaded, vec![updated]);
+    }
+
+    #[test]
+    fn golden_search_eval_suite_tracks_hit_at_3_mrr_and_negative_rejection() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        let cfg = make_test_config(3);
+
+        seed_memory_meme(
+            &mut store,
+            1,
+            "коли прод впав о третій ночі",
+            "Програміст дивиться на палаючий сервер через баг у коді",
+            "Developer watching burning server after production bug",
+            "Айті бекенд",
+            vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        seed_memory_meme(
+            &mut store,
+            2,
+            "без кави не працюю",
+            "Сонний кіт тримає велику чашку гарячої кави вранці",
+            "Sleepy cat holding a large cup of hot coffee in the morning",
+            "Ранкова кава",
+            vec![0.0, 1.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        seed_memory_meme(
+            &mut store,
+            3,
+            "зарплата прийшла і пішла",
+            "Порожній гаманець після оплати оренди квартири",
+            "Empty wallet right after paying apartment rent",
+            "Фінанси",
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        );
+        seed_memory_meme(
+            &mut store,
+            4,
+            "спина болить після 30",
+            "Чоловік тримається за поперек після підйому важкої коробки",
+            "Man holding lower back in pain after lifting heavy box",
+            "Здоров'я",
+            vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        );
+        seed_memory_meme(
+            &mut store,
+            5,
+            "пиво у п'ятницю",
+            "Пес у сонцезахисних окулярах святкує кінець робочого тижня",
+            "Dog wearing sunglasses celebrating Friday evening",
+            "П'ятниця",
+            vec![0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+        );
+        seed_memory_meme(
+            &mut store,
+            6,
+            "мавпа в Полтаві",
+            "Людина в костюмі горили сидить вночі на зупинці транспорту",
+            "Person in gorilla suit sitting at a bus stop at night",
+            "Зупинка",
+            vec![0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+        );
+
+        enum QueryKind {
+            Positive {
+                query: &'static str,
+                query_vec: [f32; 6],
+                expected_id: u64,
+            },
+            Negative {
+                query: &'static str,
+                query_vec: [f32; 6],
+            },
+        }
+
+        let cases = [
+            // standard (lexical + semantic)
+            QueryKind::Positive {
+                query: "палаючий сервер баг",
+                query_vec: [0.95, 0.1, 0.0, 0.0, 0.0, 0.0],
+                expected_id: 1,
+            },
+            QueryKind::Positive {
+                query: "кіт кава вранці",
+                query_vec: [0.0, 0.96, 0.0, 0.0, 0.0, 0.0],
+                expected_id: 2,
+            },
+            // syn_zero (semantic paraphrase, zero stemmed FTS overlap)
+            QueryKind::Positive {
+                query: "брак грошей на житло",
+                query_vec: [0.0, 0.0, 0.94, 0.0, 0.0, 0.0],
+                expected_id: 3,
+            },
+            QueryKind::Positive {
+                query: "горила чекає автобус",
+                query_vec: [0.0, 0.0, 0.0, 0.0, 0.0, 0.93],
+                expected_id: 6,
+            },
+            // NEGATIVE (unrelated / nonsense queries below 0.5 cosine & zero FTS match)
+            QueryKind::Negative {
+                query: "квантовий марсохід на орбіті",
+                query_vec: [0.2, 0.2, 0.2, 0.2, 0.2, 0.2],
+            },
+            QueryKind::Negative {
+                query: "абвгд xyzzy невідоме слово",
+                query_vec: [0.15, -0.3, 0.25, -0.2, 0.1, -0.25],
+            },
+        ];
+
+        let mut positive_total = 0usize;
+        let mut hits_at_3 = 0usize;
+        let mut mrr_sum = 0.0f32;
+        let mut negative_total = 0usize;
+        let mut negative_rejected = 0usize;
+
+        for case in cases {
+            match case {
+                QueryKind::Positive {
+                    query,
+                    query_vec,
+                    expected_id,
+                } => {
+                    positive_total += 1;
+                    let res = store.find_top_k(
+                        &query_vec,
+                        query,
+                        &cfg,
+                        1,
+                        "all".to_string(),
+                        SearchFilter::default(),
+                    );
+                    if let Some(rank_idx) = res.iter().position(|(m, _)| m.id == expected_id) {
+                        if rank_idx < 3 {
+                            hits_at_3 += 1;
+                        }
+                        mrr_sum += 1.0 / ((rank_idx + 1) as f32);
+                    }
+                }
+                QueryKind::Negative { query, query_vec } => {
+                    negative_total += 1;
+                    let res = store.find_top_k(
+                        &query_vec,
+                        query,
+                        &cfg,
+                        1,
+                        "all".to_string(),
+                        SearchFilter::default(),
+                    );
+                    if res.is_empty() {
+                        negative_rejected += 1;
+                    }
+                }
+            }
+        }
+
+        let hit_at_3_rate = hits_at_3 as f32 / positive_total as f32;
+        let mrr = mrr_sum / positive_total as f32;
+        let neg_rejection_rate = negative_rejected as f32 / negative_total as f32;
+
+        assert!(
+            (hit_at_3_rate - 1.0).abs() < f32::EPSILON,
+            "Hit@3 dropped to {}",
+            hit_at_3_rate
+        );
+        assert!(mrr >= 0.85, "MRR dropped to {}", mrr);
+        assert!(
+            (neg_rejection_rate - 1.0).abs() < f32::EPSILON,
+            "Negative rejection dropped to {}",
+            neg_rejection_rate
+        );
     }
 }

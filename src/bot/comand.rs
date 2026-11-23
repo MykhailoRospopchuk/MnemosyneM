@@ -206,6 +206,9 @@ pub async fn stats(
         )
     };
 
+    let quota = state.vlm_router.quota_snapshot().await;
+    let search_snap = state.search_metrics.snapshot();
+
     let uptime = format_uptime(state.started_at.elapsed());
     let rss_label = match read_process_rss_mb() {
         Some(mb) => format!("{:.1} MB", mb),
@@ -223,6 +226,42 @@ pub async fn stats(
         "OFF (Phase 1A only)"
     };
 
+    let tier1_detail: Vec<String> = quota
+        .models
+        .iter()
+        .filter(|m| m.tier == crate::vlm::ModelTier::Tier1)
+        .map(|m| {
+            let short = m
+                .id
+                .strip_prefix("gemini-")
+                .unwrap_or(m.id)
+                .replace("-flash-lite", "-lite");
+            if m.cooldown_remaining_secs > 90 {
+                format!("{}: {}/{} (paused)", short, m.used_today, m.rpd_limit)
+            } else if m.cooldown_remaining_secs > 0 {
+                format!(
+                    "{}: {}/{} ({}s cd)",
+                    short, m.used_today, m.rpd_limit, m.cooldown_remaining_secs
+                )
+            } else {
+                format!("{}: {}/{}", short, m.used_today, m.rpd_limit)
+            }
+        })
+        .collect();
+
+    let search_line = if search_snap.count > 0 {
+        format!(
+            "{}ms (embed {}ms · stage1 {}ms · rerank {}ms · {} reqs)",
+            search_snap.avg_total_ms,
+            search_snap.avg_embed_ms,
+            search_snap.avg_stage1_ms,
+            search_snap.avg_rerank_ms,
+            search_snap.count
+        )
+    } else {
+        "N/A (no searches yet)".to_string()
+    };
+
     let text = format!(
         "📊 MnemosyneM Stats\n\n\
         🗂 Public memes: {}\n\
@@ -232,8 +271,25 @@ pub async fn stats(
         🧠 RAM (RSS): {}\n\
         💾 SQLite DB: {}\n\
         📥 Upload queue: {}/{}\n\
-        🎯 Stage-2 Reranker: {}",
-        public, private, liked, uptime, rss_label, db_size_label, queued, max_queue, reranker_label
+        🎯 Stage-2 Reranker: {}\n\
+        ⚡ Gemini VLM ({} PT): T1 {}/{} ({}) | T2 {}/{}\n\
+        🔍 Avg Search: {}",
+        public,
+        private,
+        liked,
+        uptime,
+        rss_label,
+        db_size_label,
+        queued,
+        max_queue,
+        reranker_label,
+        quota.pt_day_key,
+        quota.tier1_used,
+        quota.tier1_limit,
+        tier1_detail.join(", "),
+        quota.tier2_used,
+        quota.tier2_limit,
+        search_line
     );
 
     let message = bot

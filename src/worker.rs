@@ -6,7 +6,7 @@ use crate::database::entity::media_type::MediaType;
 use crate::database::entity::new_meme::NewMeme;
 use crate::database::enums::vlm_error_enum::VlmError;
 use crate::helpers::telegram_bot_helper::download_telegram_file;
-use crate::vlm;
+use crate::vlm::PreSafetyDecision;
 use crate::{
     AppState,
     helpers::hash_helper::{compute_hash, extract_frame_from_video},
@@ -102,10 +102,10 @@ pub fn start_worker(
                 }
             };
 
-            let phash = match job.media_type {
+            let (phash, animation_preview_jpeg) = match job.media_type {
                 MediaType::Photo => {
                     let bytes = image_bytes.clone();
-                    match tokio::task::spawn_blocking(move || compute_hash(&bytes)).await {
+                    let h = match tokio::task::spawn_blocking(move || compute_hash(&bytes)).await {
                         Ok(Ok(phash)) => phash,
                         Ok(Err(e)) => {
                             warn!(
@@ -127,7 +127,8 @@ pub fn start_worker(
                             );
                             0
                         }
-                    }
+                    };
+                    (h, None)
                 }
                 MediaType::Animation => {
                     let mut frame_bytes = None;
@@ -169,10 +170,14 @@ pub fn start_worker(
                         let jpeg_bytes = frame_bytes.or_else(|| {
                             bytes_for_ffmpeg.and_then(|b| extract_frame_from_video(&b).ok())
                         });
-                        jpeg_bytes.and_then(|b| compute_hash(&b).ok()).unwrap_or(0)
+                        let h = jpeg_bytes
+                            .as_deref()
+                            .and_then(|b| compute_hash(b).ok())
+                            .unwrap_or(0);
+                        (h, jpeg_bytes)
                     })
                     .await
-                    .unwrap_or(0)
+                    .unwrap_or((0, None))
                 }
             };
 
@@ -225,13 +230,52 @@ pub fn start_worker(
                 drop(store);
             }
 
-            let analysis = match vlm::describe_meme(
-                &image_bytes,
-                &app_config.gemini_api_key,
-                mime_type,
-            )
-            .await
+            let safety_image: Option<&[u8]> = match job.media_type {
+                MediaType::Photo => Some(&image_bytes),
+                MediaType::Animation => animation_preview_jpeg.as_deref(),
+            };
+            if let Some(safety_bytes) = safety_image
+                && let PreSafetyDecision::Reject {
+                    reason,
+                    safety_score,
+                } = state
+                    .vlm_router
+                    .check_pre_ingestion_safety(
+                        &app_config.gemini_api_key,
+                        safety_bytes,
+                        "image/jpeg",
+                    )
+                    .await
             {
+                warn!(
+                    user_id,
+                    username,
+                    file_unique_id = %file_unique_id,
+                    safety_score,
+                    reason = %reason,
+                    "Inappropriate meme rejected by pre-ingestion safety gate"
+                );
+                reply_to_job(
+                    &bot,
+                    job.chat_id,
+                    job.message_id,
+                    format!(
+                        "⛔ [REJECTED] {}\nNSFW or graphic content is strictly prohibited!",
+                        reason
+                    ),
+                )
+                .await;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                continue;
+            }
+
+            let vlm_result = state
+                .vlm_router
+                .describe_meme(&image_bytes, &app_config.gemini_api_key, mime_type)
+                .await;
+            crate::persist_dirty_vlm_quotas(&state).await;
+
+            let analysis = match vlm_result {
                 Ok(desc) => desc,
                 Err(VlmError::InappropriateContent(reason)) => {
                     warn!(
@@ -246,12 +290,30 @@ pub fn start_worker(
                         job.chat_id,
                         job.message_id,
                         format!(
-                            "[X] [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!",
+                            "⛔ [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!",
                             reason
                         ),
                     )
                     .await;
-                    tokio::time::sleep(Duration::from_secs(4)).await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
+                Err(VlmError::DailyQuotaExhausted(msg)) => {
+                    warn!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        error = %msg,
+                        "All VLM models hit daily quota during ingestion"
+                    );
+                    reply_to_job(
+                        &bot,
+                        job.chat_id,
+                        job.message_id,
+                        "⏳ Денна квота AI-аналізу тимчасово вичерпана. Спробуй надіслати мем пізніше після оновлення ліміту (00:00 PT).",
+                    )
+                    .await;
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
                 Err(VlmError::Transient(e)) => {
@@ -431,7 +493,8 @@ pub fn start_worker(
                 }
             }
 
-            tokio::time::sleep(Duration::from_secs(4)).await;
+            let sleep_dur = state.vlm_router.recommended_worker_sleep().await;
+            tokio::time::sleep(sleep_dur).await;
         }
     });
 }
