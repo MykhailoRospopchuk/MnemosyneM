@@ -1,6 +1,7 @@
 use std::time::SystemTime;
 
 use rusqlite::{Connection, params};
+use tracing::{error, info};
 
 use crate::database::entity::memes_fts::MemesFts;
 use crate::engine::ClipEngine;
@@ -26,6 +27,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_vlm_version_column(&mut conn)?;
     add_memes_fts_index(&mut conn)?;
     add_user_reactions_table(&mut conn)?;
+    add_drip_subscription_tables(&mut conn)?;
 
     Ok(())
 }
@@ -46,9 +48,9 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] {} - Recalculating embeddings for memes from description_uk & description_en...",
-        migratin_name
+    info!(
+        migration = %migratin_name,
+        "Recalculating embeddings for memes from description_uk & description_en"
     );
 
     let mut stmt = conn
@@ -67,7 +69,7 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
     drop(stmt);
     let total = memes_to_update.len();
 
-    println!("[MIGRATION] Found {} memes to recalculate.", total);
+    info!(migration = %migratin_name, total, "Found memes to recalculate embeddings");
 
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     {
@@ -93,7 +95,7 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
                 .execute(params![blob_uk, blob_en, id])
                 .map_err(|e| e.to_string())?;
             if (idx + 1) % 50 == 0 || idx + 1 == total {
-                println!("[MIGRATION] Recalculated {}/{} memes...", idx + 1, total);
+                info!(migration = %migratin_name, processed = idx + 1, total, "Recalculated embeddings progress");
             }
         }
     }
@@ -107,9 +109,9 @@ fn recalculate_embeddings(conn: &mut Connection, engine: &mut ClipEngine) -> Res
     )
     .map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    println!(
-        "[MIGRATION] - {}: Successfully finished! All embeddings updated.",
-        migratin_name
+    info!(
+        migration = %migratin_name,
+        "Migration finished: all embeddings updated"
     );
     Ok(())
 }
@@ -130,9 +132,9 @@ fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] - {}: Adding hash column to memes table for computed hash value...",
-        migration_name
+    info!(
+        migration = %migration_name,
+        "Adding phash column to memes table"
     );
 
     let mut stmt = conn
@@ -170,7 +172,7 @@ fn add_hash_column_to_memes(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    info!(migration = %migration_name, "Migration finished successfully");
     Ok(())
 }
 
@@ -189,9 +191,9 @@ fn add_media_type_column(conn: &mut Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] - {}: Adding media type column to memes table...",
-        migration_name
+    info!(
+        migration = %migration_name,
+        "Adding media_type and thumbnail_tg_id columns to memes table"
     );
 
     let mut stmt = conn
@@ -240,7 +242,7 @@ fn add_media_type_column(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    info!(migration = %migration_name, "Migration finished successfully");
     Ok(())
 }
 
@@ -259,9 +261,9 @@ fn add_vlm_version_column(conn: &mut Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] - {}: Adding vlm version column to memes table...",
-        migration_name
+    info!(
+        migration = %migration_name,
+        "Adding vlm_version column to memes table"
     );
 
     let mut stmt = conn
@@ -298,7 +300,7 @@ fn add_vlm_version_column(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    info!(migration = %migration_name, "Migration finished successfully");
     Ok(())
 }
 
@@ -317,9 +319,9 @@ fn add_memes_fts_index(conn: &mut Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] - {}: Adding memes fts virtual table...",
-        migration_name
+    info!(
+        migration = %migration_name,
+        "Creating memes_fts virtual table and indexing rows"
     );
 
     conn.execute(
@@ -354,9 +356,10 @@ fn add_memes_fts_index(conn: &mut Connection) -> Result<(), String> {
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for meme in memes_to_update {
         if let Err(e) = db_helper::upsert_fts_entry(&tx, meme) {
-            eprintln!(
-                "[MIGRATION]-[ERROR] - {}: error to insert meme_fts: {}",
-                migration_name, e
+            error!(
+                migration = %migration_name,
+                error = %e,
+                "Failed to insert meme_fts entry during migration"
             );
         }
     }
@@ -372,7 +375,7 @@ fn add_memes_fts_index(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    info!(migration = %migration_name, "Migration finished successfully");
     Ok(())
 }
 
@@ -391,9 +394,9 @@ fn add_user_reactions_table(conn: &mut Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    println!(
-        "[MIGRATION] - {}: Creating user_reactions table and index...",
-        migration_name
+    info!(
+        migration = %migration_name,
+        "Creating user_reactions table and index"
     );
 
     conn.execute_batch(
@@ -421,6 +424,65 @@ fn add_user_reactions_table(conn: &mut Connection) -> Result<(), String> {
     )
     .map_err(|e| e.to_string())?;
 
-    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    info!(migration = %migration_name, "Migration finished successfully");
+    Ok(())
+}
+
+fn add_drip_subscription_tables(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795446000_add_drip_subscription_tables".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    info!(
+        migration = %migration_name,
+        "Creating meme_subscriptions and user_delivered_memes tables"
+    );
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS meme_subscriptions (
+            user_id BIGINT PRIMARY KEY,
+            chat_id BIGINT NOT NULL,
+            memes_per_day INTEGER NOT NULL DEFAULT 3,
+            tz_offset_hours INTEGER NOT NULL DEFAULT 2,
+            quiet_start_hour INTEGER NOT NULL DEFAULT 23,
+            quiet_end_hour INTEGER NOT NULL DEFAULT 9,
+            next_delivery_at BIGINT NOT NULL DEFAULT 0,
+            is_active BOOLEAN NOT NULL DEFAULT 1,
+            created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_meme_subscriptions_due
+            ON meme_subscriptions(is_active, next_delivery_at);
+        CREATE TABLE IF NOT EXISTS user_delivered_memes (
+            user_id BIGINT NOT NULL,
+            meme_id BIGINT NOT NULL,
+            delivered_at BIGINT NOT NULL,
+            PRIMARY KEY (user_id, meme_id)
+        );
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    info!(migration = %migration_name, "Migration finished successfully");
     Ok(())
 }

@@ -12,6 +12,7 @@ use teloxide::types::{
 };
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc::Sender;
+use tracing::{error, warn};
 
 use crate::AppState;
 use crate::bot::handlers::build_caption;
@@ -24,6 +25,7 @@ use crate::worker::MemeJob;
 
 pub const BTN_TINDER: &str = "🔥 Мем-Тіндер";
 pub const BTN_LIKED: &str = "❤️ Вподобані";
+pub const BTN_DRIP: &str = "🎁 Підписка";
 pub const BTN_RANDOM: &str = "🎲 Випадковий мем";
 pub const BTN_STATS: &str = "📊 Статистика";
 pub const BTN_SETTINGS: &str = "⚙️ Налаштування";
@@ -67,12 +69,13 @@ pub fn main_keyboard() -> KeyboardMarkup {
         ],
         vec![
             KeyboardButton::new(BTN_LIKED),
-            KeyboardButton::new(BTN_STATS),
+            KeyboardButton::new(BTN_DRIP),
         ],
         vec![
+            KeyboardButton::new(BTN_STATS),
             KeyboardButton::new(BTN_SETTINGS),
-            KeyboardButton::new(BTN_HELP),
         ],
+        vec![KeyboardButton::new(BTN_HELP)],
     ])
     .resize_keyboard()
     .persistent()
@@ -511,7 +514,7 @@ pub async fn try_handle_pending_reset(
                         }
                     },
                     Err(e) => {
-                        eprintln!("[SETTINGS]-[ERROR] reset_user_reactions failed: {}", e);
+                        error!(user_id, error = %e, "Failed to reset user reactions");
                         "❌ Помилка при скиданні реакцій.".to_string()
                     }
                 };
@@ -551,7 +554,7 @@ pub async fn handle_settings_callback(
 
         if data == "toggle_upload" {
             if let Err(e) = meme_store.toggle_upload_mode(user_id) {
-                eprintln!("[ERROR] toggle_upload_mode failed: {}", e);
+                error!(user_id, error = %e, "toggle_upload_mode failed");
             }
             let settings = meme_store.get_user_settings(user_id);
             let counts = meme_store.get_user_reaction_counts(user_id);
@@ -562,7 +565,7 @@ pub async fn handle_settings_callback(
             )
         } else if data == "cycle_scope" {
             if let Err(e) = meme_store.cycle_search_scope(user_id) {
-                eprintln!("[ERROR] cycle_search_scope failed: {}", e);
+                error!(user_id, error = %e, "cycle_search_scope failed");
             }
             let settings = meme_store.get_user_settings(user_id);
             let counts = meme_store.get_user_reaction_counts(user_id);
@@ -646,7 +649,7 @@ pub async fn handle_settings_callback(
                             _ => format!("✅ Скинуто всі реакції ({})", deleted),
                         },
                         Err(e) => {
-                            eprintln!("[SETTINGS]-[ERROR] reset_user_reactions failed: {}", e);
+                            error!(user_id, error = %e, "Failed to reset user reactions");
                             "❌ Помилка при скиданні".to_string()
                         }
                     };
@@ -687,7 +690,7 @@ pub async fn handle_settings_callback(
         answer_req.await
     };
     if let Err(e) = answer_res {
-        eprintln!("[WARN] Failed to answer callback query: {}", e);
+        warn!(user_id, error = %e, "Failed to answer settings callback query");
     }
 
     if let Some((text, keyboard)) = edit
@@ -698,7 +701,7 @@ pub async fn handle_settings_callback(
             .await
         && !e.to_string().contains("message is not modified")
     {
-        eprintln!("[WARN] Failed to edit settings message: {}", e);
+        warn!(user_id, error = %e, "Failed to edit settings message");
     }
 
     Ok(())

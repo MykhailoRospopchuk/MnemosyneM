@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use teloxide::{Bot, net::Download, requests::Requester, types::FileId};
+use tracing::warn;
 
 pub async fn download_telegram_file(
     bot: &Bot,
@@ -27,9 +28,13 @@ pub async fn download_telegram_file(
 
         if attemp < max_attemp {
             let delay_second = attemp as u64 * (2 * attemp as u64);
-            eprintln!(
-                "[WORKER]-[WARN] Attempt {}/{} for file {} failed ({}). Retrying in {} sec...",
-                attemp, max_attemp, file_id, last_error, delay_second
+            warn!(
+                attempt = attemp,
+                max_attempts = max_attemp,
+                file_id,
+                delay_secs = delay_second,
+                error = %last_error,
+                "Telegram file download failed; retrying"
             );
             tokio::time::sleep(Duration::from_secs(delay_second)).await;
         }

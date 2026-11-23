@@ -72,17 +72,6 @@ This document captures ideas, product concepts, and future extensions for **Mnem
 
 ---
 
-### 3. 🕷️ Autonomous Public Channel Crawler (Channel Crawler)
-* **Concept:** Periodically monitors a curated list of public Telegram channels every few hours and enriches the public meme catalog automatically without requiring channel admin rights.
-* **Mechanism (`t.me/s/` Web Mirror):**
-  * Telegram exposes public channel feeds at `https://t.me/s/<channel_username>`.
-  * A background Rust worker (`reqwest` + `scraper`) parses recent posts and downloads new images.
-  * Fresh media enters the existing `QueueWorker` ingestion pipeline.
-  * Provenance fields are populated automatically: `source_title: "@channel_name"`, `source_url: "https://t.me/..."`.
-* **Benefits:** No userbots or admin permissions needed; the database stays continuously fresh.
-
----
-
 ## 👥 Social Features & Virality (Virality & Growth)
 
 ### 3. 🎭 "Meme for That" / Group Chat Reaction Mode
@@ -173,3 +162,14 @@ This document captures ideas, product concepts, and future extensions for **Mnem
   * **Masonry Grid (Pinterest):** Infinite-scroll gallery view across thousands of memes.
   * **Subscription Controls:** Visual sliders to configure "Dopamine Subscription" cadence and quiet hours.
   * *(Note: Meme Tinder swiping was moved to the native bot UI—see item 2—because building a TMA requires maintaining a separate web stack).*
+
+---
+
+## 🧊 Low-Priority / Deferred Ideas
+
+### 13. 🕷️ Autonomous Public Channel Crawler (Channel Crawler) *(Deferred)*
+* **Why deferred:** MnemosyneM's core value is a human-curated catalog of funny memes submitted directly by users, rather than bulk-scraping noisy public channels. Revisit only if automated catalog expansion becomes necessary.
+* **Mechanism (`t.me/s/` Web Mirror):**
+  * Telegram exposes public channel feeds at `https://t.me/s/<channel_username>`.
+  * A background Rust worker (`reqwest` + `scraper`) parses recent posts and downloads new images.
+  * Fresh media enters the existing `QueueWorker` ingestion pipeline with provenance (`source_title`, `source_url`).

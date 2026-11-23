@@ -1,5 +1,6 @@
 use std::env;
 use std::sync::OnceLock;
+use tracing::{error, info};
 
 const TOP_K: usize = 3;
 const MAX_PHASH_DISTANCE: u32 = 5;
@@ -22,18 +23,18 @@ static CONFIG: OnceLock<AppConfig> = OnceLock::new();
 
 pub fn load_config() -> &'static AppConfig {
     match env::var("TELOXIDE_TOKEN") {
-        Ok(_) => println!("TELOXIDE_TOKEN: [CONFIGURED]"),
-        Err(e) => eprintln!("Couldn't read TELOXIDE_TOKEN: {}", e),
+        Ok(_) => info!("TELOXIDE_TOKEN: [CONFIGURED]"),
+        Err(e) => error!(error = %e, "Couldn't read TELOXIDE_TOKEN"),
     }
 
     match env::var("DB_PATH") {
-        Ok(url) => println!("DB_PATH: {}", url),
-        Err(e) => eprintln!("Couldn't read DB_PATH: {}", e),
+        Ok(url) => info!(db_path = %url, "DB_PATH configured"),
+        Err(e) => error!(error = %e, "Couldn't read DB_PATH"),
     }
 
     match env::var("GEMINI_API_KEY") {
-        Ok(_) => println!("GEMINI_API_KEY: [CONFIGURED]"),
-        Err(e) => eprintln!("Couldn't read GEMINI_API_KEY: {}", e),
+        Ok(_) => info!("GEMINI_API_KEY: [CONFIGURED]"),
+        Err(e) => error!(error = %e, "Couldn't read GEMINI_API_KEY"),
     }
 
     CONFIG.get_or_init(|| AppConfig {

@@ -20,4 +20,6 @@ pub enum Command {
     Tinder,
     #[command(description = "Browse your liked memes")]
     Liked,
+    #[command(description = "Random meme subscription (Meme Drip)")]
+    Drip,
 }

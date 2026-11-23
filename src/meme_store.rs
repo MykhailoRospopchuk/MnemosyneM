@@ -8,10 +8,12 @@ use crate::{
 };
 use rusqlite::{Connection, params};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::RandomState},
+    hash::{BuildHasher, Hasher},
     path::Path,
     time::SystemTime,
 };
+use tracing::{error, warn};
 
 use crate::{
     database::{
@@ -60,6 +62,18 @@ impl UserReactionCounts {
     pub fn total(&self) -> usize {
         self.likes + self.dislikes + self.skips
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DripSubscription {
+    pub user_id: i64,
+    pub chat_id: i64,
+    pub memes_per_day: u8,
+    pub tz_offset_hours: i8,
+    pub quiet_start_hour: u8,
+    pub quiet_end_hour: u8,
+    pub next_delivery_at: u64,
+    pub is_active: bool,
 }
 
 struct FtsHit {
@@ -354,6 +368,28 @@ impl MemeStore {
 
             CREATE INDEX IF NOT EXISTS idx_user_reactions_lookup
                 ON user_reactions(user_id, reaction);
+
+            CREATE TABLE IF NOT EXISTS meme_subscriptions (
+                user_id BIGINT PRIMARY KEY,
+                chat_id BIGINT NOT NULL,
+                memes_per_day INTEGER NOT NULL DEFAULT 3,
+                tz_offset_hours INTEGER NOT NULL DEFAULT 2,
+                quiet_start_hour INTEGER NOT NULL DEFAULT 23,
+                quiet_end_hour INTEGER NOT NULL DEFAULT 9,
+                next_delivery_at BIGINT NOT NULL DEFAULT 0,
+                is_active BOOLEAN NOT NULL DEFAULT 1,
+                created_at BIGINT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_meme_subscriptions_due
+                ON meme_subscriptions(is_active, next_delivery_at);
+
+            CREATE TABLE IF NOT EXISTS user_delivered_memes (
+                user_id BIGINT NOT NULL,
+                meme_id BIGINT NOT NULL,
+                delivered_at BIGINT NOT NULL,
+                PRIMARY KEY (user_id, meme_id)
+            );
             ",
         )
         .map_err(|e| e.to_string())?;
@@ -721,7 +757,7 @@ impl MemeStore {
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("[RERANK]-[WARN] Failed to prepare passage lookup: {}", e);
+                warn!(error = %e, "Failed to prepare rerank passage lookup");
                 return HashMap::new();
             }
         };
@@ -740,7 +776,7 @@ impl MemeStore {
         }) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[RERANK]-[WARN] Failed to fetch rerank passages: {}", e);
+                warn!(error = %e, "Failed to fetch rerank passages");
                 return HashMap::new();
             }
         };
@@ -752,7 +788,7 @@ impl MemeStore {
                     passages.insert(id, passage);
                 }
                 Err(e) => {
-                    eprintln!("[RERANK]-[WARN] Failed to map passage row: {}", e);
+                    warn!(error = %e, "Failed to map rerank passage row");
                 }
             }
         }
@@ -1004,7 +1040,7 @@ impl MemeStore {
                 ) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!("[FTS]-[ERROR] Failed to prepare FTS query: {}", e);
+                        error!(error = %e, "Failed to prepare FTS query");
                         return HashMap::new();
                     }
                 };
@@ -1022,7 +1058,7 @@ impl MemeStore {
                 }) {
                     Ok(r) => r,
                     Err(e) => {
-                        eprintln!("[FTS]-[ERROR] Failed to mapp FTS rpw: {}", e);
+                        error!(error = %e, "Failed to query FTS index");
                         return HashMap::new();
                     }
                 };
@@ -1051,7 +1087,7 @@ impl MemeStore {
                                 },
                             );
                         }
-                        Err(e) => eprintln!("[FTS]-[WARN] Failed t omap FTS row: {}", e),
+                        Err(e) => warn!(error = %e, "Failed to map FTS row"),
                     }
                 }
                 drop(stmt);
@@ -1247,6 +1283,182 @@ impl MemeStore {
             .filter_map(|id| meme_by_id.get(&id).map(|m| (*m).clone()))
             .collect()
     }
+
+    pub fn get_drip_subscription(&self, user_id: i64) -> Option<DripSubscription> {
+        self.conn
+            .query_row(
+                "SELECT user_id, chat_id, memes_per_day, tz_offset_hours, quiet_start_hour, quiet_end_hour, next_delivery_at, is_active
+                 FROM meme_subscriptions
+                 WHERE user_id = ?",
+                params![user_id],
+                map_drip_subscription_row,
+            )
+            .ok()
+    }
+
+    pub fn upsert_drip_subscription(&self, sub: &DripSubscription) -> Result<(), String> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.conn
+            .execute(
+                "INSERT INTO meme_subscriptions (
+                     user_id, chat_id, memes_per_day, tz_offset_hours,
+                     quiet_start_hour, quiet_end_hour, next_delivery_at, is_active, created_at
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(user_id) DO UPDATE SET
+                     chat_id = excluded.chat_id,
+                     memes_per_day = excluded.memes_per_day,
+                     tz_offset_hours = excluded.tz_offset_hours,
+                     quiet_start_hour = excluded.quiet_start_hour,
+                     quiet_end_hour = excluded.quiet_end_hour,
+                     next_delivery_at = excluded.next_delivery_at,
+                     is_active = excluded.is_active",
+                params![
+                    sub.user_id,
+                    sub.chat_id,
+                    sub.memes_per_day,
+                    sub.tz_offset_hours,
+                    sub.quiet_start_hour,
+                    sub.quiet_end_hour,
+                    sub.next_delivery_at as i64,
+                    sub.is_active,
+                    now as i64,
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn set_drip_active(&self, user_id: i64, is_active: bool) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE meme_subscriptions SET is_active = ? WHERE user_id = ?",
+                params![is_active, user_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn update_drip_next_delivery(
+        &self,
+        user_id: i64,
+        next_delivery_at: u64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "UPDATE meme_subscriptions SET next_delivery_at = ? WHERE user_id = ?",
+                params![next_delivery_at as i64, user_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn get_due_drip_subscriptions(&self, now_secs: u64) -> Vec<DripSubscription> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT user_id, chat_id, memes_per_day, tz_offset_hours, quiet_start_hour, quiet_end_hour, next_delivery_at, is_active
+             FROM meme_subscriptions
+             WHERE is_active = 1 AND next_delivery_at <= ?",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![now_secs as i64], map_drip_subscription_row) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn count_user_delivered_memes(&self, user_id: i64) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_delivered_memes WHERE user_id = ?",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn reset_user_delivered_memes(&self, user_id: i64) -> Result<usize, String> {
+        self.conn
+            .execute(
+                "DELETE FROM user_delivered_memes WHERE user_id = ?",
+                params![user_id],
+            )
+            .map_err(|e| e.to_string())
+    }
+
+    pub fn record_delivered_meme(
+        &self,
+        user_id: i64,
+        meme_id: u64,
+        delivered_at: u64,
+    ) -> Result<(), String> {
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO user_delivered_memes (user_id, meme_id, delivered_at)
+                 VALUES (?, ?, ?)",
+                params![user_id, meme_id, delivered_at as i64],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    pub fn pick_next_drip_meme(&self, user_id: i64) -> Option<Meme> {
+        let mut excluded_ids: HashSet<u64> = HashSet::new();
+        for sql in [
+            "SELECT meme_id FROM user_delivered_memes WHERE user_id = ?",
+            "SELECT meme_id FROM user_reactions WHERE user_id = ? AND reaction = 'dislike'",
+        ] {
+            if let Ok(mut stmt) = self.conn.prepare(sql)
+                && let Ok(rows) = stmt.query_map(params![user_id], |row| row.get::<_, u64>(0))
+            {
+                for id in rows.flatten() {
+                    excluded_ids.insert(id);
+                }
+            }
+        }
+
+        let candidates: Vec<&Meme> = self
+            .memes
+            .iter()
+            .filter(|m| {
+                m.is_visible_to(user_id, "all")
+                    && !m.file_tg_id.is_empty()
+                    && !excluded_ids.contains(&m.id)
+            })
+            .collect();
+
+        if candidates.is_empty() {
+            return None;
+        }
+
+        let mut hasher = RandomState::new().build_hasher();
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64;
+        hasher.write_u64(nanos);
+        let idx = (hasher.finish() as usize) % candidates.len();
+        Some(candidates[idx].clone())
+    }
+}
+
+fn map_drip_subscription_row(row: &rusqlite::Row) -> rusqlite::Result<DripSubscription> {
+    Ok(DripSubscription {
+        user_id: row.get(0)?,
+        chat_id: row.get(1)?,
+        memes_per_day: row.get::<_, i64>(2)?.clamp(1, 255) as u8,
+        tz_offset_hours: row.get::<_, i64>(3)?.clamp(-12, 14) as i8,
+        quiet_start_hour: row.get::<_, i64>(4)?.clamp(0, 23) as u8,
+        quiet_end_hour: row.get::<_, i64>(5)?.clamp(0, 23) as u8,
+        next_delivery_at: row.get::<_, i64>(6)?.max(0) as u64,
+        is_active: row.get(7)?,
+    })
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
@@ -1934,5 +2146,52 @@ mod tests {
         assert_eq!(store.get_user_reaction_counts(user_b).dislikes, 1);
 
         assert!(store.reset_user_reactions(user_a, Some("bogus")).is_err());
+    }
+
+    #[test]
+    fn drip_subscriptions_track_due_exclude_delivered_and_disliked() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "m1", "опис 1", "desc 1", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "m2", "опис 2", "desc 2", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "m3", "опис 3", "desc 3", "", vec![1.0, 0.0]);
+
+        let user_id = 42;
+        let sub = DripSubscription {
+            user_id,
+            chat_id: user_id,
+            memes_per_day: 3,
+            tz_offset_hours: 2,
+            quiet_start_hour: 23,
+            quiet_end_hour: 9,
+            next_delivery_at: 1000,
+            is_active: true,
+        };
+        store.upsert_drip_subscription(&sub).unwrap();
+
+        assert!(store.get_due_drip_subscriptions(999).is_empty());
+        assert_eq!(store.get_due_drip_subscriptions(1000).len(), 1);
+        assert_eq!(store.get_drip_subscription(user_id).unwrap(), sub);
+
+        // Dislike meme 1 and mark meme 2 delivered -> only meme 3 remains eligible
+        store.record_reaction(user_id, 1, "dislike").unwrap();
+        store.record_delivered_meme(user_id, 2, 1000).unwrap();
+        assert_eq!(store.pick_next_drip_meme(user_id).unwrap().id, 3);
+
+        // Deliver meme 3 -> no unseen memes left
+        store.record_delivered_meme(user_id, 3, 1005).unwrap();
+        assert!(store.pick_next_drip_meme(user_id).is_none());
+        assert_eq!(store.count_user_delivered_memes(user_id), 2);
+
+        // Reset delivery history -> memes 2 and 3 return, disliked meme 1 stays excluded
+        assert_eq!(store.reset_user_delivered_memes(user_id), Ok(2));
+        assert_eq!(store.count_user_delivered_memes(user_id), 0);
+        for _ in 0..10 {
+            let picked = store.pick_next_drip_meme(user_id).unwrap().id;
+            assert!(picked == 2 || picked == 3);
+        }
+
+        // Pause subscription -> excluded from due subscriptions
+        store.set_drip_active(user_id, false).unwrap();
+        assert!(store.get_due_drip_subscriptions(1000).is_empty());
     }
 }

@@ -1,4 +1,5 @@
 pub mod comand;
+pub mod drip;
 pub mod handlers;
 pub mod tinder;
 
@@ -16,18 +17,21 @@ use teloxide::types::User;
 use teloxide::update_listeners;
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc::Sender;
+use tracing::{debug, error, info, warn};
 
 async fn register_commands_with_retry(bot: &Bot, max_attempts: u32) {
     for attempt in 1..=max_attempts {
         match bot.set_my_commands(Command::bot_commands()).await {
             Ok(_) => {
-                println!("[BOT] Commands registered successfully.");
+                info!("Telegram bot commands registered successfully");
                 return;
             }
             Err(e) => {
-                eprintln!(
-                    "[BOT]-[WARN] set_my_commands failed (attempt {}/{}): {}",
-                    attempt, max_attempts, e
+                warn!(
+                    attempt,
+                    max_attempts,
+                    error = %e,
+                    "Failed to register Telegram bot commands"
                 );
                 if attempt < max_attempts {
                     let delay_secs = 2 * attempt as u64;
@@ -37,9 +41,9 @@ async fn register_commands_with_retry(bot: &Bot, max_attempts: u32) {
         }
     }
 
-    eprintln!(
-        "[BOT]-[WARN] Could not register commands after {} attempts; continuing startup anyway.",
-        max_attempts
+    warn!(
+        max_attempts,
+        "Could not register commands after all attempts; continuing startup anyway"
     );
 }
 
@@ -51,21 +55,31 @@ pub async fn run_bot(
 ) {
     register_commands_with_retry(&bot, 3).await;
 
+    let polling = update_listeners::polling_default(bot.clone()).await;
+    let consecutive_errors = Arc::new(AtomicU32::new(0));
+    let reset_counter = Arc::clone(&consecutive_errors);
+
     let handler = dptree::entry()
+        .inspect(move || {
+            let prev = reset_counter.swap(0, Ordering::Relaxed);
+            if prev > 0 {
+                info!(previous_streak = prev, "Telegram polling connection recovered");
+            }
+        })
         .branch(Update::filter_message().endpoint(message_handler))
         .branch(Update::filter_callback_query().endpoint(callback_handler))
         .branch(Update::filter_inline_query().endpoint(inline_query_handler));
 
-    let polling = update_listeners::polling_default(bot.clone()).await;
-    let consecutive_errors = Arc::new(AtomicU32::new(0));
     let polling_error_handler = Arc::new(move |err| {
         let counter = Arc::clone(&consecutive_errors);
         async move {
             let streak = counter.fetch_add(1, Ordering::Relaxed) + 1;
             let backoff_secs = (streak as u64 * 3).min(30);
-            eprintln!(
-                "[BOT]-[ERROR] Telegram polling error (streak={}): {:?}. Backing off {}s...",
-                streak, err, backoff_secs
+            error!(
+                streak,
+                backoff_secs,
+                error = ?err,
+                "Telegram polling error; backing off"
             );
             tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
         }
@@ -73,6 +87,12 @@ pub async fn run_bot(
 
     Dispatcher::builder(bot, handler)
         .dependencies(dptree::deps![state, sender, app_config])
+        .error_handler(Arc::new(|err| async move {
+            error!(error = ?err, "Dispatcher update handler error");
+        }))
+        .default_handler(|upd| async move {
+            debug!(update_id = upd.id.0, "Ignoring unhandled Telegram update");
+        })
         .enable_ctrlc_handler()
         .build()
         .dispatch_with_listener(polling, polling_error_handler)
@@ -127,6 +147,9 @@ pub async fn message_handler(
                 Ok(Command::Liked) => {
                     tinder::cmd_liked(bot, msg, state).await?;
                 }
+                Ok(Command::Drip) => {
+                    drip::cmd_drip(bot, msg, state).await?;
+                }
                 Err(_) => {
                     comand::error(bot, msg).await?;
                 }
@@ -139,6 +162,7 @@ pub async fn message_handler(
             trimmed,
             comand::BTN_TINDER
                 | comand::BTN_LIKED
+                | comand::BTN_DRIP
                 | comand::BTN_RANDOM
                 | comand::BTN_STATS
                 | comand::BTN_SETTINGS
@@ -154,6 +178,10 @@ pub async fn message_handler(
             }
             comand::BTN_LIKED => {
                 tinder::cmd_liked(bot, msg, state).await?;
+                return Ok(());
+            }
+            comand::BTN_DRIP => {
+                drip::cmd_drip(bot, msg, state).await?;
                 return Ok(());
             }
             comand::BTN_RANDOM => {
@@ -197,6 +225,9 @@ pub async fn callback_handler(
         if data.starts_with("liked:") {
             return tinder::handle_liked_callback(bot, callback_query, state, &data).await;
         }
+        if data.starts_with("drip:") {
+            return drip::handle_drip_callback(bot, callback_query, state, &data).await;
+        }
 
         return comand::handle_settings_callback(bot, callback_query, state, &data).await;
     }
@@ -223,6 +254,6 @@ pub async fn check_user(user: User, state: &Arc<AppState>) {
 
     let mut meme_store = state.meme_store.lock().await;
     if let Err(e) = meme_store.sync_user(user.id.0 as i64, &username, &first_name, &last_name) {
-        eprintln!("[ERROR] Failed to sync user {} : {}", user.id.0, e)
+        error!(user_id = user.id.0, error = %e, "Failed to sync user");
     };
 }

@@ -597,15 +597,15 @@ Meme ID: 1793041234
   - [x] Dispatcher error handler with backoff on repeated Telegram polling disconnects.
   - [ ] Per-meme privacy toggles (`Make Public` / `Keep Private` on uploaded meme message).
   - [x] Batch upload message attribution: attach `MessageId` to `MemeJob` and use `.reply_to_message_id()` for all worker feedback.
-  - [ ] Meme Drip Delivery (Рандомайзер мемів / «Дофамінова підписка»):
-    - [ ] SQLite tables `meme_subscriptions` and `user_delivered_memes`.
-    - [ ] Background Tokio scheduler with randomized Jitter intervals and Quiet Hours (`23:00` – `09:00`).
-    - [ ] Interactive commands `/drip` or `/subscribe` to activate/pause delivery and set daily frequency.
-  - [ ] Production structured logging (`tracing` + `tracing-subscriber`):
-    - [ ] Replace raw `println!` / `eprintln!` across `handlers`, `worker`, `vlm`, and `engine`.
-    - [ ] Add UTC timestamps to every log line to track when actions happen.
-    - [ ] Add user context (`user_id`, `@username`, `chat_id`) to photo ingestion, queue worker, and search queries.
-    - [ ] Configure log-level filtering (`INFO`, `WARN`, `ERROR`, `DEBUG`) via `RUST_LOG` environment variable.
+  - [x] Meme Drip Delivery (Рандомайзер мемів / «Дофамінова підписка»):
+    - [x] SQLite tables `meme_subscriptions` and `user_delivered_memes`.
+    - [x] Background Tokio scheduler with randomized Jitter intervals and Quiet Hours (`23:00` – `09:00`).
+    - [x] Interactive commands `/drip` or `/subscribe` to activate/pause delivery and set daily frequency.
+  - [x] Production structured logging (`tracing` + `tracing-subscriber`):
+    - [x] Replace raw `println!` / `eprintln!` across `handlers`, `worker`, `vlm`, and `engine`.
+    - [x] Add UTC timestamps to every log line to track when actions happen.
+    - [x] Add user context (`user_id`, `@username`, `chat_id`) to photo ingestion, queue worker, and search queries.
+    - [x] Configure log-level filtering (`INFO`, `WARN`, `ERROR`, `DEBUG`) via `RUST_LOG` environment variable.
   - [ ] In-process runtime resource metrics & health dashboard (`/stats`):
     - [x] Measure process memory (RSS / Virtual RAM via `/proc/self/statm` on Linux).
     - [x] Track bot process uptime (`Instant::now().elapsed()`).

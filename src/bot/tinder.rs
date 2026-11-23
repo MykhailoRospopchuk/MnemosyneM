@@ -10,6 +10,7 @@ use teloxide::types::{
 use crate::AppState;
 use crate::database::entity::media_type::MediaType;
 use crate::database::entity::meme::Meme;
+use tracing::{error, warn};
 
 fn format_source_line(meme: &Meme) -> String {
     if meme.source_url.is_empty() {
@@ -209,7 +210,7 @@ pub async fn handle_tinder_callback(
         let next = {
             let store = state.meme_store.lock().await;
             if let Err(e) = store.reset_user_skips(user_id) {
-                eprintln!("[TINDER]-[ERROR] Failed to reset skips: {}", e);
+                error!(user_id, error = %e, "Failed to reset tinder skips");
             }
             store.get_next_tinder_meme(user_id)
         };
@@ -219,7 +220,7 @@ pub async fn handle_tinder_callback(
             .text("🔄 Скіпи скинуто!")
             .await
         {
-            eprintln!("[TINDER]-[WARN] answer_callback_query failed: {}", e);
+            warn!(user_id, error = %e, "Failed to answer tinder reset_skips callback");
         }
 
         if let Some(msg) = callback_query.regular_message() {
@@ -233,7 +234,7 @@ pub async fn handle_tinder_callback(
                             .reply_markup(kb)
                             .await
                         {
-                            eprintln!("[TINDER]-[WARN] edit_message_media failed: {}", e);
+                            warn!(user_id, meme_id = meme.id, error = %e, "Failed to edit tinder media after skip reset");
                         }
                     } else {
                         let _ = bot
@@ -243,7 +244,7 @@ pub async fn handle_tinder_callback(
                         if let Err(e) =
                             send_meme_with_markup(&bot, msg.chat.id, &meme, caption, kb).await
                         {
-                            eprintln!("[TINDER]-[WARN] send_meme_with_markup failed: {}", e);
+                            warn!(user_id, meme_id = meme.id, error = %e, "Failed to send tinder meme after skip reset");
                         }
                     }
                 }
@@ -286,7 +287,7 @@ pub async fn handle_tinder_callback(
     let (next, skips) = {
         let store = state.meme_store.lock().await;
         if let Err(e) = store.record_reaction(user_id, meme_id, action) {
-            eprintln!("[TINDER]-[ERROR] Failed to record reaction: {}", e);
+            error!(user_id, meme_id, action, error = %e, "Failed to record tinder reaction");
         }
         let next = store.get_next_tinder_meme(user_id);
         let skips = if next.is_none() {
@@ -303,7 +304,7 @@ pub async fn handle_tinder_callback(
         _ => "⏭️ Пропущено",
     };
     if let Err(e) = bot.answer_callback_query(callback_id).text(toast).await {
-        eprintln!("[TINDER]-[WARN] answer_callback_query failed: {}", e);
+        warn!(user_id, meme_id, error = %e, "Failed to answer tinder callback query");
     }
 
     if let Some(msg) = callback_query.regular_message() {
@@ -318,7 +319,7 @@ pub async fn handle_tinder_callback(
                     .reply_markup(tinder_keyboard(next_meme.id))
                     .await
                 {
-                    eprintln!("[TINDER]-[WARN] Failed to edit tinder media: {}", e);
+                    warn!(user_id, meme_id = next_meme.id, error = %e, "Failed to edit tinder media");
                 }
             }
             None => {
@@ -344,7 +345,7 @@ pub async fn handle_tinder_callback(
                     .reply_markup(kb)
                     .await
                 {
-                    eprintln!("[TINDER]-[WARN] Failed to edit tinder caption: {}", e);
+                    warn!(user_id, error = %e, "Failed to edit tinder caption");
                 }
             }
         }
@@ -397,7 +398,7 @@ pub async fn handle_liked_callback(
                     .reply_markup(liked_keyboard(meme, user_id, idx, liked.len()))
                     .await
                 {
-                    eprintln!("[LIKED]-[WARN] Failed to paginate liked media: {}", e);
+                    warn!(user_id, meme_id = meme.id, error = %e, "Failed to paginate liked media");
                 }
             }
         }
@@ -432,7 +433,7 @@ pub async fn handle_liked_callback(
                 Ok(true) => "📥 Збережено в твою колекцію!",
                 Ok(false) => "✅ Вже у твоїй колекції",
                 Err(ref e) => {
-                    eprintln!("[LIKED]-[ERROR] link_existing_meme failed: {}", e);
+                    error!(user_id, meme_id, error = %e, "Failed to link liked meme to collection");
                     "⚠️ Не вдалося зберегти"
                 }
             };
@@ -451,7 +452,7 @@ pub async fn handle_liked_callback(
                     .reply_markup(liked_keyboard(meme, user_id, pos, liked.len()))
                     .await
                 {
-                    eprintln!("[LIKED]-[WARN] Failed to refresh save markup: {}", e);
+                    warn!(user_id, meme_id = meme.id, error = %e, "Failed to refresh liked save markup");
                 }
             }
         }
@@ -459,7 +460,7 @@ pub async fn handle_liked_callback(
             let liked = {
                 let store = state.meme_store.lock().await;
                 if let Err(e) = store.remove_reaction(user_id, meme_id) {
-                    eprintln!("[LIKED]-[ERROR] remove_reaction failed: {}", e);
+                    error!(user_id, meme_id, error = %e, "Failed to remove liked reaction");
                 }
                 store.get_liked_memes(user_id)
             };
@@ -477,7 +478,7 @@ pub async fn handle_liked_callback(
                         .reply_markup(InlineKeyboardMarkup::default())
                         .await
                     {
-                        eprintln!("[LIKED]-[WARN] Failed to clear liked caption: {}", e);
+                        warn!(user_id, error = %e, "Failed to clear liked caption");
                     }
                 } else {
                     let idx = current_idx.min(liked.len() - 1);
@@ -491,7 +492,7 @@ pub async fn handle_liked_callback(
                         .reply_markup(liked_keyboard(meme, user_id, idx, liked.len()))
                         .await
                     {
-                        eprintln!("[LIKED]-[WARN] Failed to show next liked media: {}", e);
+                        warn!(user_id, meme_id = meme.id, error = %e, "Failed to show next liked media");
                     }
                 }
             }

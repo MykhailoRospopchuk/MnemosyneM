@@ -18,6 +18,7 @@ use teloxide::{
     types::{ChatId, MessageId, ReplyParameters},
 };
 use tokio::sync::mpsc::{Receiver, Sender};
+use tracing::{debug, error, info, warn};
 
 #[derive(Clone, Debug)]
 pub struct MemeJob {
@@ -28,6 +29,7 @@ pub struct MemeJob {
     pub captions: String,
     pub retry_count: u8,
     pub user_id: i64,
+    pub username: Option<String>,
     pub source_title: String,
     pub source_url: String,
     pub media_type: MediaType,
@@ -49,22 +51,31 @@ pub fn start_worker(
     app_config: &'static AppConfig,
 ) {
     tokio::spawn(async move {
-        println!("[WORKER] Background queue consumer started....");
+        info!("Background queue worker started");
 
         while let Some(job) = receiver.recv().await {
-            println!("[--- QUEUE WORKER ---]");
-            println!(
-                "[WORKER] Processing meme: {} | Total Queue: [{}]",
-                job.file_unique_id,
-                receiver.len()
+            let user_id = job.user_id;
+            let username_owned = job.username.clone();
+            let username = username_owned.as_deref().unwrap_or("-");
+            let file_unique_id = job.file_unique_id.clone();
+
+            info!(
+                user_id,
+                username,
+                file_unique_id = %file_unique_id,
+                queue_len = receiver.len(),
+                "Processing meme ingestion job"
             );
 
             let image_bytes = match download_telegram_file(&bot, &job.file_id, 3).await {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    eprintln!(
-                        "[WORKER]-[ERROR] Failed to download file after retries: {}",
-                        e
+                    error!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        error = %e,
+                        "Failed to download file after retries"
                     );
                     reply_to_job(
                         &bot,
@@ -83,11 +94,23 @@ pub fn start_worker(
                     match tokio::task::spawn_blocking(move || compute_hash(&bytes)).await {
                         Ok(Ok(phash)) => phash,
                         Ok(Err(e)) => {
-                            eprintln!("[WORKER]-[WARN] Failed to compute hash for image: {}", e);
+                            warn!(
+                                user_id,
+                                username,
+                                file_unique_id = %file_unique_id,
+                                error = %e,
+                                "Failed to compute pHash for image"
+                            );
                             0
                         }
                         Err(e) => {
-                            eprintln!("[WORKER]-[WARN] Blocking hash task panicked: {}", e);
+                            warn!(
+                                user_id,
+                                username,
+                                file_unique_id = %file_unique_id,
+                                error = %e,
+                                "Blocking pHash task panicked"
+                            );
                             0
                         }
                     }
@@ -98,9 +121,12 @@ pub fn start_worker(
                         match download_telegram_file(&bot, &thumbnail_id, 3).await {
                             Ok(bytes) => frame_bytes = Some(bytes),
                             Err(e) => {
-                                eprintln!(
-                                    "[WORKER]-[ERROR] Failed to download thumbnail after retries: {}",
-                                    e
+                                error!(
+                                    user_id,
+                                    username,
+                                    file_unique_id = %file_unique_id,
+                                    error = %e,
+                                    "Failed to download animation thumbnail after retries"
                                 );
                                 reply_to_job(
                                     &bot,
@@ -114,8 +140,11 @@ pub fn start_worker(
                     }
 
                     let bytes_for_ffmpeg = if frame_bytes.is_none() {
-                        println!(
-                            "[WORKER] Telegram provided no thumbnail. Extracting first frame via ffmpeg..."
+                        debug!(
+                            user_id,
+                            username,
+                            file_unique_id = %file_unique_id,
+                            "Telegram provided no thumbnail; extracting first frame via ffmpeg"
                         );
                         Some(image_bytes.clone())
                     } else {
@@ -144,9 +173,13 @@ pub fn start_worker(
                 if let Some((exiting_meme_id, distance)) =
                     store.find_duplicate_by_phash(phash, app_config.max_phash_distance)
                 {
-                    println!(
-                        "[WORKER] Duplicate meme detected by pHash. Matched meme [{}] | distance [{distance}])! Skipping Gemini VLM",
-                        exiting_meme_id
+                    info!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        meme_id = exiting_meme_id,
+                        distance,
+                        "Duplicate meme detected by pHash; skipping Gemini VLM"
                     );
 
                     match store.link_existing_meme(exiting_meme_id, job.user_id, &job.captions) {
@@ -160,7 +193,13 @@ pub fn start_worker(
                             reply_to_job(&bot, job.chat_id, job.message_id, text).await;
                         }
                         Err(e) => {
-                            eprintln!("[WORKER]-[ERROR] Failed to ling duplicate meme: {}", e)
+                            error!(
+                                user_id,
+                                username,
+                                meme_id = exiting_meme_id,
+                                error = %e,
+                                "Failed to link duplicate meme"
+                            );
                         }
                     }
 
@@ -181,9 +220,12 @@ pub fn start_worker(
             {
                 Ok(desc) => desc,
                 Err(VlmError::InappropriateContent(reason)) => {
-                    eprintln!(
-                        "[WORKER SECURITY ALERT] Inappropriate meme rejected: {}",
-                        reason
+                    warn!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        reason = %reason,
+                        "Inappropriate meme rejected by safety filter"
                     );
                     reply_to_job(
                         &bot,
@@ -199,22 +241,34 @@ pub fn start_worker(
                     continue;
                 }
                 Err(VlmError::Transient(e)) => {
-                    eprintln!("[WORKER]-[ERROR] Something go wrong VLM: {}", e);
+                    error!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        error = %e,
+                        "Transient VLM error during ingestion"
+                    );
                     if job.retry_count < 2 {
                         let mut retried_job = job;
                         retried_job.retry_count += 1;
                         let delay_sec = 5 * retried_job.retry_count as u64;
-                        println!(
-                            "[WORKER] Retrying meme {} (attempt {}/2)... after {} sec",
-                            retried_job.file_unique_id, retried_job.retry_count, delay_sec
+                        warn!(
+                            user_id,
+                            username,
+                            file_unique_id = %file_unique_id,
+                            attempt = retried_job.retry_count,
+                            delay_secs = delay_sec,
+                            "Retrying meme ingestion job"
                         );
 
                         tokio::time::sleep(Duration::from_secs(delay_sec)).await;
                         let _ = sender.send(retried_job).await;
                     } else {
-                        eprintln!(
-                            "[WORKER] Max retries reached for {}. Dropping task.",
-                            job.file_unique_id
+                        error!(
+                            user_id,
+                            username,
+                            file_unique_id = %file_unique_id,
+                            "Max retries reached; dropping meme ingestion job"
                         );
                         reply_to_job(
                             &bot,
@@ -265,7 +319,13 @@ pub fn start_worker(
 
             match save_result {
                 Ok(()) => {
-                    println!("[WORKER] Sucessfully saved in SQLite!");
+                    info!(
+                        user_id,
+                        username,
+                        meme_id = id,
+                        file_unique_id = %file_unique_id,
+                        "Meme saved to SQLite"
+                    );
                     reply_to_job(
                         &bot,
                         job.chat_id,
@@ -275,7 +335,13 @@ pub fn start_worker(
                     .await;
                 }
                 Err(e) => {
-                    eprintln!("[WORKER]-[ERROR] DB error SQLite: {}", e);
+                    error!(
+                        user_id,
+                        username,
+                        file_unique_id = %file_unique_id,
+                        error = %e,
+                        "Failed to save meme in SQLite"
+                    );
                     reply_to_job(
                         &bot,
                         job.chat_id,

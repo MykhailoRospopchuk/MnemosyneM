@@ -3,6 +3,7 @@ use std::{sync::Arc, time::Duration};
 use teloxide::{Bot, net::Download, requests::Requester, types::FileId};
 use tokio::sync::mpsc::Sender;
 use tokio::time::{MissedTickBehavior, interval};
+use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
 use crate::constants::CURRENT_VLM_VERSION;
@@ -24,7 +25,7 @@ pub fn start_maintenance(
     sender: Sender<MemeJob>,
 ) {
     tokio::spawn(async move {
-        println!("[MAINTENANCE] Background maintenance service started.");
+        info!("Background maintenance service started");
 
         let mut timer = interval(Duration::from_secs(600));
         timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -32,7 +33,7 @@ pub fn start_maintenance(
         loop {
             timer.tick().await;
 
-            println!("[MAINTENANCE] Backfill pHash is started...");
+            debug!("Starting pHash backfill pass");
             backfill_phash_processor(Arc::clone(&state), bot.clone()).await;
 
             if app_config.auto_reprocess {
@@ -50,14 +51,11 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
 
     let total = unhashed.len();
     if total == 0 {
-        println!("[MAINTENANCE] All memes already have phash. Nothing to process.");
+        debug!("All memes already have pHash; nothing to backfill");
         return;
     }
 
-    println!(
-        "[MAINTENANCE] Found {} memes without phash, Processing in background...",
-        total
-    );
+    info!(total, "Found memes without pHash; backfilling in background");
 
     let mut success_count = 0;
 
@@ -65,20 +63,14 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
         let file = match bot.get_file(FileId(file_tg_id)).await {
             Ok(f) => f,
             Err(e) => {
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Failed to get file for meme {} : {}",
-                    meme_id, e
-                );
+                warn!(meme_id, error = %e, "Failed to get Telegram file metadata during pHash backfill");
                 continue;
             }
         };
 
         let mut file_bytes: Vec<u8> = Vec::new();
         if let Err(e) = bot.download_file(&file.path, &mut file_bytes).await {
-            eprintln!(
-                "[MAINTENANCE]-[WARN] Failed to download media for meme {} : {}",
-                meme_id, e
-            );
+            warn!(meme_id, error = %e, "Failed to download media during pHash backfill");
             continue;
         }
 
@@ -98,10 +90,7 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
         let phash = match phash {
             Ok(h) => h,
             Err(e) => {
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Failed to calculate hash for meme {} : {}",
-                    meme_id, e
-                );
+                warn!(meme_id, error = %e, "Failed to calculate pHash during backfill");
                 continue;
             }
         };
@@ -109,30 +98,20 @@ async fn backfill_phash_processor(state: Arc<AppState>, bot: Bot) {
         if phash != 0 {
             let mut storage = state.meme_store.lock().await;
             if let Err(e) = storage.update_phash(meme_id, phash) {
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Failed to save hash for meme {} : {}",
-                    meme_id, e
-                );
+                warn!(meme_id, error = %e, "Failed to save pHash during backfill");
             } else {
                 success_count += 1;
             }
         }
 
         if (idx + 1) % 25 == 0 || idx + 1 == total {
-            println!(
-                "[MAINTENANCE] hashed and synced {}/{} memes in background...",
-                idx + 1,
-                total
-            );
+            info!(processed = idx + 1, total, "pHash backfill progress");
         }
 
         tokio::time::sleep(Duration::from_millis(60)).await;
     }
 
-    println!(
-        "[MAINTENANCE] Processing finished! Successfully hashed {}/{} memes.",
-        success_count, total
-    );
+    info!(success_count, total, "pHash backfill pass finished");
 }
 
 async fn reprocess_vlm(
@@ -147,14 +126,12 @@ async fn reprocess_vlm(
     };
 
     if !reprocess_candidate.is_empty() {
+        let backup_path = format!("{}.pre_v{}.bak", app_config.db_path, CURRENT_VLM_VERSION);
         let store = state.meme_store.lock().await;
-        match store.create_pre_process_backup(format!(
-            "{}.pre_v{}.bak",
-            app_config.db_path, CURRENT_VLM_VERSION
-        )) {
-            Ok(()) => println!("[MAINTENANCE] - Backup created"),
+        match store.create_pre_process_backup(backup_path.clone()) {
+            Ok(()) => info!(backup_path = %backup_path, "Pre-reprocess backup created"),
             Err(e) => {
-                eprintln!("[MAINTENANCE]-[ERROR] - Backup NOT created | ERROR: {}", e);
+                error!(backup_path = %backup_path, error = %e, "Failed to create pre-reprocess backup");
                 return;
             }
         };
@@ -179,10 +156,7 @@ async fn reprocess_vlm(
         let bytes = match download_telegram_file(&bot, &item.file_tg_id, 3).await {
             Ok(b) => b,
             Err(e) => {
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Download failed for {}: {}",
-                    item.id, e
-                );
+                warn!(meme_id = item.id, error = %e, "Failed to download media for VLM reprocess");
                 continue;
             }
         };
@@ -202,7 +176,7 @@ async fn reprocess_vlm(
                 let (embed_uk, embed_en) = match embeds {
                     Ok(pair) => pair,
                     Err(e) => {
-                        eprintln!("[MAINTENANCE]-[WARN] Embed failed for {}: {}", item.id, e);
+                        warn!(meme_id = item.id, error = %e, "Failed to embed reprocessed descriptions");
                         continue;
                     }
                 };
@@ -220,40 +194,34 @@ async fn reprocess_vlm(
                 };
 
                 if let Err(e) = res {
-                    eprintln!(
-                        "[MAINTENANCE]-[WARN] DB update failed for {}: {}",
-                        item.id, e
-                    );
+                    warn!(meme_id = item.id, error = %e, "Failed to save reprocessed meme in DB");
                 } else {
                     updated += 1;
                     consecutive_transient = 0;
-                    println!(
-                        "[MAINTENANCE] Reprocessed {}/{} (id={})",
-                        idx + 1,
+                    info!(
+                        processed = idx + 1,
                         total,
-                        item.id
+                        meme_id = item.id,
+                        "Reprocessed meme VLM metadata"
                     );
                 }
             }
             Err(VlmError::InappropriateContent(reason)) => {
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Skipped NSFW meme {}: {}",
-                    item.id, reason
-                );
+                warn!(meme_id = item.id, reason = %reason, "Skipped NSFW meme during reprocess");
                 let mut store = state.meme_store.lock().await;
                 let _ = store.mark_meme_vlm_version(item.id, -CURRENT_VLM_VERSION);
                 skipped += 1;
             }
             Err(VlmError::Transient(e)) => {
                 consecutive_transient += 1;
-                eprintln!(
-                    "[MAINTENANCE]-[WARN] Transient VLM error ({}/3) for {}: {}",
-                    consecutive_transient, item.id, e
+                warn!(
+                    meme_id = item.id,
+                    consecutive_transient,
+                    error = %e,
+                    "Transient VLM error during reprocess"
                 );
                 if consecutive_transient >= 3 {
-                    eprintln!(
-                        "[MAINTENANCE] Pausing reprocess until next tick (possible RPD/429 limit)."
-                    );
+                    warn!("Pausing VLM reprocess until next tick due to repeated transient errors");
                     break;
                 }
             }
@@ -262,8 +230,9 @@ async fn reprocess_vlm(
         tokio::time::sleep(Duration::from_secs(5)).await;
     }
 
-    println!(
-        "[MAINTENANCE] Reprocess pass done: updated={}, skipped={}",
-        updated, skipped
-    );
+    if total == 0 {
+        debug!("Reprocess VLM pass done; nothing to reprocess");
+    } else {
+        info!(total, updated, skipped, "Reprocess VLM pass finished");
+    }
 }

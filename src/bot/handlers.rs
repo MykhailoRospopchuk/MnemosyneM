@@ -15,6 +15,7 @@ use teloxide::types::{
     PhotoSize, ReplyParameters,
 };
 use tokio::sync::mpsc::Sender;
+use tracing::{error, info, warn};
 
 struct MediaPayload {
     file_id: String,
@@ -31,11 +32,13 @@ async fn enqueue_meme_job(
     sender: &Sender<MemeJob>,
 ) -> ResponseResult<()> {
     let user_id = msg.chat.id.0;
+    let username_opt = msg.from.as_ref().and_then(|u| u.username.clone());
+    let username = username_opt.as_deref().unwrap_or("-");
     let caption = msg.caption().unwrap_or("").to_string();
 
-    let (label, log_tag) = match payload.media_type {
-        MediaType::Photo => ("meme", "PHOTO-HANDLER"),
-        MediaType::Animation => ("GIF", "ANIMATION-HANDLER"),
+    let label = match payload.media_type {
+        MediaType::Photo => "meme",
+        MediaType::Animation => "GIF",
     };
 
     let (source_title, source_url) = match msg.forward_origin() {
@@ -81,10 +84,23 @@ async fn enqueue_meme_job(
             return Ok(());
         }
         Ok(BookMarkStatus::NewMemeNeeded) => {
-            println!("[{}]-[INFO] someone just drop new {}!", log_tag, label);
+            info!(
+                user_id,
+                username,
+                chat_id = msg.chat.id.0,
+                media = label,
+                file_unique_id = %payload.file_unique_id,
+                "New media received for indexing"
+            );
         }
         Err(e) => {
-            eprintln!("[{}]-[ERROR] Bookmark check error: {}", log_tag, e);
+            error!(
+                user_id,
+                username,
+                media = label,
+                error = %e,
+                "Bookmark check failed"
+            );
         }
     };
 
@@ -98,12 +114,19 @@ async fn enqueue_meme_job(
         source_url,
         retry_count: 0,
         user_id,
+        username: username_opt.clone(),
         media_type: payload.media_type,
         thumbnail_file_id: payload.thumbnail_file_id,
     };
 
     if let Err(e) = sender.send(job).await {
-        eprintln!("[{}]-[ERROR] Queue error: {}", log_tag, e);
+        error!(
+            user_id,
+            username,
+            media = label,
+            error = %e,
+            "Failed to enqueue media job"
+        );
         bot.send_message(msg.chat.id, "Queue is full, please try again later!")
             .reply_parameters(ReplyParameters::new(msg.id).allow_sending_without_reply())
             .await?;
@@ -177,8 +200,9 @@ async fn run_search(
         Some(_) => match state.rerank_semaphore.clone().try_acquire_owned() {
             Ok(permit) => Some(permit),
             Err(_) => {
-                eprintln!(
-                    "[RERANK]-[WARN] Reranker queue busy; falling back to fast Phase 1A search."
+                warn!(
+                    user_id,
+                    "Reranker queue busy; falling back to fast Phase 1A search"
                 );
                 None
             }
@@ -237,11 +261,12 @@ async fn run_search(
                 .map(|c| format!("id={}({:.4})", c.meme.id, score))
         })
         .collect();
-    println!(
-        "[RERANK] {} candidates scored in {:?} | top3: [{}]",
-        passage_count,
-        t0.elapsed(),
-        top3_debug.join(", ")
+    info!(
+        user_id,
+        candidates = passage_count,
+        latency_ms = t0.elapsed().as_millis(),
+        top3 = %top3_debug.join(", "),
+        "Stage-2 rerank completed"
     );
 
     let filtered = filter_reranked(ranked, app_config.rerank_min_score, app_config.top_k);
@@ -271,17 +296,21 @@ pub async fn handle_search(
         return Ok(());
     }
 
+    let user_id = msg.chat.id.0;
+    let username = msg
+        .from
+        .as_ref()
+        .and_then(|u| u.username.as_deref())
+        .unwrap_or("-");
+    let t0 = Instant::now();
+
     bot.send_message(msg.chat.id, "Process search...").await?;
-    println!(
-        "\n---- [SEARCH] ---- User query: [{}] | Media Type {:?}",
-        text, media_filter
-    );
 
     match run_search(
         state,
         app_config,
         &clean_query,
-        msg.chat.id.0,
+        user_id,
         media_filter,
         app_config.rerank_candidates,
         true,
@@ -289,6 +318,15 @@ pub async fn handle_search(
     .await
     {
         Ok(results) if results.is_empty() => {
+            info!(
+                user_id,
+                username,
+                query = %clean_query,
+                ?media_filter,
+                results = 0usize,
+                latency_ms = t0.elapsed().as_millis(),
+                "Search completed"
+            );
             bot.send_message(msg.chat.id, "There is nothing here...")
                 .await?;
         }
@@ -297,6 +335,16 @@ pub async fn handle_search(
                 .into_iter()
                 .filter(|(meme, _)| !meme.file_tg_id.is_empty())
                 .collect();
+            let results_count = valid_memes.len();
+            info!(
+                user_id,
+                username,
+                query = %clean_query,
+                ?media_filter,
+                results = results_count,
+                latency_ms = t0.elapsed().as_millis(),
+                "Search completed"
+            );
 
             if valid_memes.is_empty() {
                 bot.send_message(msg.chat.id, "There is nothing useful here...")
@@ -316,7 +364,12 @@ pub async fn handle_search(
                                 .caption(caption)
                                 .await
                             {
-                                eprintln!("[ERROR] Telegram send_animation failed: {:?}", e);
+                                error!(
+                                    user_id,
+                                    username,
+                                    error = ?e,
+                                    "Telegram send_animation failed"
+                                );
                                 bot.send_message(
                                     msg.chat.id,
                                     format!("Send animation error: {}", e),
@@ -339,7 +392,12 @@ pub async fn handle_search(
                             .caption(caption)
                             .await
                         {
-                            eprintln!("[ERROR] Telegram send_photo failed: {:?}", e);
+                            error!(
+                                user_id,
+                                username,
+                                error = ?e,
+                                "Telegram send_photo failed"
+                            );
                             bot.send_message(msg.chat.id, format!("Send photo error: {}", e))
                                 .await?;
                         }
@@ -356,7 +414,12 @@ pub async fn handle_search(
                             .collect();
                         if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await
                         {
-                            eprintln!("[ERROR] Telegram send_media_group failed: {:?}", e);
+                            error!(
+                                user_id,
+                                username,
+                                error = ?e,
+                                "Telegram send_media_group failed"
+                            );
                             bot.send_message(msg.chat.id, format!("Send album error: {}", e))
                                 .await?;
                         }
@@ -365,7 +428,13 @@ pub async fn handle_search(
             }
         }
         Err(e) => {
-            eprintln!("[ERROR] Search error: {}", e);
+            error!(
+                user_id,
+                username,
+                query = %clean_query,
+                error = %e,
+                "Search failed"
+            );
             bot.send_message(msg.chat.id, format!("Dead inside: {}", e))
                 .await?;
         }
@@ -380,6 +449,7 @@ pub async fn handle_inline_query(
     app_config: &'static AppConfig,
 ) -> ResponseResult<()> {
     let user_id = query.from.id.0 as i64;
+    let username = query.from.username.as_deref().unwrap_or("-");
     let (media_filter, clean_query) = parse_media_filter(&query.query);
 
     let make_inline_result = |idx: usize, meme: &Meme, score: f32| -> InlineQueryResult {
@@ -420,7 +490,12 @@ pub async fn handle_inline_query(
             .cache_time(5)
             .await
         {
-            eprintln!("[ERROR] Inline search for empty query error: {}", e);
+            error!(
+                user_id,
+                username,
+                error = %e,
+                "Inline search for empty query failed"
+            );
         }
         return Ok(());
     }
@@ -432,7 +507,12 @@ pub async fn handle_inline_query(
             .cache_time(5)
             .await
         {
-            eprintln!("[ERROR] Inline search fro short query error: {}", e);
+            error!(
+                user_id,
+                username,
+                error = %e,
+                "Inline search for short query failed"
+            );
         }
         return Ok(());
     }
@@ -451,8 +531,7 @@ pub async fn handle_inline_query(
         }
     }
 
-    println!("\n---- [INLINE_SEARCH] ---- User query: [{}]", clean_query);
-
+    let t0 = Instant::now();
     let results = match run_search(
         &state,
         app_config,
@@ -464,14 +543,32 @@ pub async fn handle_inline_query(
     )
     .await
     {
-        Ok(matches) => matches
-            .into_iter()
-            .enumerate()
-            .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
-            .map(|(idx, (meme, score))| make_inline_result(idx, &meme, score))
-            .collect(),
+        Ok(matches) => {
+            let items: Vec<InlineQueryResult> = matches
+                .into_iter()
+                .enumerate()
+                .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
+                .map(|(idx, (meme, score))| make_inline_result(idx, &meme, score))
+                .collect();
+            info!(
+                user_id,
+                username,
+                query = %clean_query,
+                ?media_filter,
+                results = items.len(),
+                latency_ms = t0.elapsed().as_millis(),
+                "Inline search completed"
+            );
+            items
+        }
         Err(e) => {
-            eprintln!("[ERROR] Inline search error: {}", e);
+            error!(
+                user_id,
+                username,
+                query = %clean_query,
+                error = %e,
+                "Inline search failed"
+            );
             vec![]
         }
     };
@@ -482,7 +579,12 @@ pub async fn handle_inline_query(
         .cache_time(30)
         .await
     {
-        eprintln!("[WARN] Failed to answer inline query: {}", e);
+        warn!(
+            user_id,
+            username,
+            error = %e,
+            "Failed to answer inline query"
+        );
     }
 
     Ok(())
