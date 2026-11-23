@@ -27,6 +27,7 @@ struct AppState {
     rerank_semaphore: Arc<Semaphore>,
     started_at: Instant,
     last_inline_query: Mutex<HashMap<i64, String>>,
+    pending_reaction_resets: Mutex<HashMap<i64, bot::comand::PendingReactionReset>>,
 }
 
 #[tokio::main]
@@ -69,6 +70,7 @@ async fn main() {
         rerank_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_RERANK_SLOTS)),
         started_at: Instant::now(),
         last_inline_query: Mutex::new(HashMap::new()),
+        pending_reaction_resets: Mutex::new(HashMap::new()),
     });
 
     let bot = Bot::from_env();

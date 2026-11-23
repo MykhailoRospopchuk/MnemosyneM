@@ -49,6 +49,19 @@ pub struct Stage1Candidate {
     pub passage: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UserReactionCounts {
+    pub likes: usize,
+    pub dislikes: usize,
+    pub skips: usize,
+}
+
+impl UserReactionCounts {
+    pub fn total(&self) -> usize {
+        self.likes + self.dislikes + self.skips
+    }
+}
+
 struct FtsHit {
     bm25_score: f32,
     matched_terms: usize,
@@ -329,7 +342,18 @@ impl MemeStore {
                 uk_norm,
                 en_norm,
                 title_norm
-            )
+            );
+
+            CREATE TABLE IF NOT EXISTS user_reactions (
+                user_id BIGINT NOT NULL,
+                meme_id BIGINT NOT NULL,
+                reaction TEXT NOT NULL CHECK (reaction IN ('like', 'dislike', 'skip')),
+                created_at BIGINT NOT NULL,
+                PRIMARY KEY (user_id, meme_id)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_user_reactions_lookup
+                ON user_reactions(user_id, reaction);
             ",
         )
         .map_err(|e| e.to_string())?;
@@ -1037,6 +1061,192 @@ impl MemeStore {
             None => return HashMap::new(),
         };
     }
+
+    pub fn record_reaction(
+        &self,
+        user_id: i64,
+        meme_id: u64,
+        reaction: &str,
+    ) -> Result<(), String> {
+        if !matches!(reaction, "like" | "dislike" | "skip") {
+            return Err(format!("Unsupported reaction: {}", reaction));
+        }
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        self.conn
+            .execute(
+                "INSERT INTO user_reactions (user_id, meme_id, reaction, created_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(user_id, meme_id) DO UPDATE SET
+                     reaction = excluded.reaction,
+                     created_at = excluded.created_at",
+                params![user_id, meme_id, reaction, now],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+
+    pub fn remove_reaction(&self, user_id: i64, meme_id: u64) -> Result<(), String> {
+        self.conn
+            .execute(
+                "DELETE FROM user_reactions WHERE user_id = ? AND meme_id = ?",
+                params![user_id, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Counts a user's Tinder reactions grouped by kind (`like`, `dislike`, `skip`).
+    pub fn get_user_reaction_counts(&self, user_id: i64) -> UserReactionCounts {
+        let mut counts = UserReactionCounts::default();
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT reaction, COUNT(*)
+             FROM user_reactions
+             WHERE user_id = ?
+             GROUP BY reaction",
+        ) else {
+            return counts;
+        };
+
+        let Ok(rows) = stmt.query_map(params![user_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        }) else {
+            return counts;
+        };
+
+        for (reaction, count) in rows.flatten() {
+            let count = count.max(0) as usize;
+            match reaction.as_str() {
+                "like" => counts.likes = count,
+                "dislike" => counts.dislikes = count,
+                "skip" => counts.skips = count,
+                _ => {}
+            }
+        }
+
+        counts
+    }
+
+    /// Deletes a user's reactions for the specified kind (`Some("like" | "dislike" | "skip")`)
+    /// or all reactions when `reaction` is `None`. Returns the number of deleted rows.
+    pub fn reset_user_reactions(
+        &self,
+        user_id: i64,
+        reaction: Option<&str>,
+    ) -> Result<usize, String> {
+        match reaction {
+            Some(kind) => {
+                if !matches!(kind, "like" | "dislike" | "skip") {
+                    return Err(format!("Invalid reaction type: {}", kind));
+                }
+                self.conn
+                    .execute(
+                        "DELETE FROM user_reactions WHERE user_id = ? AND reaction = ?",
+                        params![user_id, kind],
+                    )
+                    .map_err(|e| e.to_string())
+            }
+            None => self
+                .conn
+                .execute(
+                    "DELETE FROM user_reactions WHERE user_id = ?",
+                    params![user_id],
+                )
+                .map_err(|e| e.to_string()),
+        }
+    }
+
+    pub fn reset_user_skips(&self, user_id: i64) -> Result<usize, String> {
+        self.reset_user_reactions(user_id, Some("skip"))
+    }
+
+    pub fn count_user_skips(&self, user_id: i64) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_reactions WHERE user_id = ? AND reaction = 'skip'",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn count_user_likes(&self, user_id: i64) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_reactions WHERE user_id = ? AND reaction = 'like'",
+                params![user_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0)
+    }
+
+    pub fn get_next_tinder_meme(&self, user_id: i64) -> Option<(Meme, usize)> {
+        let mut reacted_ids: HashSet<u64> = HashSet::new();
+        if let Ok(mut stmt) = self
+            .conn
+            .prepare("SELECT meme_id FROM user_reactions WHERE user_id = ?")
+            && let Ok(rows) = stmt.query_map(params![user_id], |row| row.get::<_, u64>(0))
+        {
+            for id in rows.flatten() {
+                reacted_ids.insert(id);
+            }
+        }
+
+        let candidates: Vec<&Meme> = self
+            .memes
+            .iter()
+            .filter(|m| {
+                m.is_visible_to(user_id, "all")
+                    && !m.file_tg_id.is_empty()
+                    && !reacted_ids.contains(&m.id)
+            })
+            .collect();
+
+        let remaining = candidates.len();
+        if remaining == 0 {
+            return None;
+        }
+
+        let nanos = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos() as usize;
+        let idx = nanos.wrapping_mul(2_654_435_761) % remaining;
+        Some((candidates[idx].clone(), remaining))
+    }
+
+    pub fn get_liked_memes(&self, user_id: i64) -> Vec<Meme> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT meme_id
+             FROM user_reactions
+             WHERE user_id = ? AND reaction = 'like'
+             ORDER BY created_at DESC",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![user_id], |row| row.get::<_, u64>(0)) else {
+            return Vec::new();
+        };
+
+        let meme_by_id: HashMap<u64, &Meme> = self
+            .memes
+            .iter()
+            .filter(|m| !m.file_tg_id.is_empty())
+            .map(|m| (m.id, m))
+            .collect();
+
+        rows.flatten()
+            .filter_map(|id| meme_by_id.get(&id).map(|m| (*m).clone()))
+            .collect()
+    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> Result<f32, String> {
@@ -1621,5 +1831,108 @@ mod tests {
         );
         assert_eq!(candidates[1].meme.id, 2);
         assert_eq!(candidates[1].passage, "Кіт у паніці дивиться на годинник");
+    }
+
+    #[test]
+    fn tinder_reactions_track_unseen_separate_likes_and_reset_skips() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "m1", "опис 1", "desc 1", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "m2", "опис 2", "desc 2", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "m3", "опис 3", "desc 3", "", vec![1.0, 0.0]);
+
+        let viewer_id = 2;
+
+        // Like meme 1 -> added to /liked, NOT added to personal collection (user_memes / owners)
+        store.record_reaction(viewer_id, 1, "like").unwrap();
+        let liked_ids: Vec<u64> = store.get_liked_memes(viewer_id).iter().map(|m| m.id).collect();
+        assert_eq!(liked_ids, vec![1]);
+        assert!(!store.memes[0].is_owned_by(viewer_id));
+        let (_, remaining) = store.get_next_tinder_meme(viewer_id).unwrap();
+        assert_eq!(remaining, 2);
+
+        // Dislike meme 2 -> not in /liked, only meme 3 remains unseen
+        store.record_reaction(viewer_id, 2, "dislike").unwrap();
+        let liked_ids: Vec<u64> = store.get_liked_memes(viewer_id).iter().map(|m| m.id).collect();
+        assert_eq!(liked_ids, vec![1]);
+        let (next_meme, remaining) = store.get_next_tinder_meme(viewer_id).unwrap();
+        assert_eq!(next_meme.id, 3);
+        assert_eq!(remaining, 1);
+
+        // Skip meme 3 -> deck exhausted, skip count == 1
+        store.record_reaction(viewer_id, 3, "skip").unwrap();
+        assert!(store.get_next_tinder_meme(viewer_id).is_none());
+        assert_eq!(store.count_user_skips(viewer_id), 1);
+
+        // Reset skips -> only skipped meme 3 returns; like on 1 and dislike on 2 stay recorded
+        assert_eq!(store.reset_user_skips(viewer_id).unwrap(), 1);
+        let (next_meme, remaining) = store.get_next_tinder_meme(viewer_id).unwrap();
+        assert_eq!(next_meme.id, 3);
+        assert_eq!(remaining, 1);
+        assert_eq!(store.count_user_likes(viewer_id), 1);
+
+        // Removing like on 1 clears it from /liked
+        store.remove_reaction(viewer_id, 1).unwrap();
+        assert!(store.get_liked_memes(viewer_id).is_empty());
+    }
+
+    #[test]
+    fn user_reaction_counts_and_selective_resets() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "m1", "опис 1", "desc 1", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "m2", "опис 2", "desc 2", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "m3", "опис 3", "desc 3", "", vec![1.0, 0.0]);
+
+        let user_a = 10;
+        let user_b = 20;
+
+        store.record_reaction(user_a, 1, "like").unwrap();
+        store.record_reaction(user_a, 2, "dislike").unwrap();
+        store.record_reaction(user_a, 3, "skip").unwrap();
+        store.record_reaction(user_b, 1, "dislike").unwrap();
+
+        assert_eq!(
+            store.get_user_reaction_counts(user_a),
+            UserReactionCounts {
+                likes: 1,
+                dislikes: 1,
+                skips: 1,
+            }
+        );
+        assert_eq!(store.get_user_reaction_counts(user_a).total(), 3);
+
+        // Reset dislikes for user_a -> meme 2 returns to /tinder, likes and skips remain
+        assert_eq!(store.reset_user_reactions(user_a, Some("dislike")), Ok(1));
+        assert_eq!(
+            store.get_user_reaction_counts(user_a),
+            UserReactionCounts {
+                likes: 1,
+                dislikes: 0,
+                skips: 1,
+            }
+        );
+        let (next_meme, remaining) = store.get_next_tinder_meme(user_a).unwrap();
+        assert_eq!(next_meme.id, 2);
+        assert_eq!(remaining, 1);
+
+        // Reset likes for user_a -> /liked is cleared, skips stay
+        assert_eq!(store.reset_user_reactions(user_a, Some("like")), Ok(1));
+        assert_eq!(
+            store.get_user_reaction_counts(user_a),
+            UserReactionCounts {
+                likes: 0,
+                dislikes: 0,
+                skips: 1,
+            }
+        );
+        assert!(store.get_liked_memes(user_a).is_empty());
+
+        // Re-add reactions for user_a and reset all -> user_a cleared, user_b untouched
+        store.record_reaction(user_a, 1, "like").unwrap();
+        store.record_reaction(user_a, 2, "dislike").unwrap();
+        assert_eq!(store.reset_user_reactions(user_a, None), Ok(3));
+        assert_eq!(store.get_user_reaction_counts(user_a).total(), 0);
+        assert_eq!(store.get_user_reaction_counts(user_b).dislikes, 1);
+
+        assert!(store.reset_user_reactions(user_a, Some("bogus")).is_err());
     }
 }

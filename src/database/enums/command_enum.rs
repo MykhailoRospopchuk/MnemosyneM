@@ -16,4 +16,8 @@ pub enum Command {
     Random,
     #[command(description = "Set up your stuff")]
     Settings,
+    #[command(description = "Swipe and rate memes (Meme Tinder)")]
+    Tinder,
+    #[command(description = "Browse your liked memes")]
+    Liked,
 }

@@ -25,6 +25,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_media_type_column(&mut conn)?;
     add_vlm_version_column(&mut conn)?;
     add_memes_fts_index(&mut conn)?;
+    add_user_reactions_table(&mut conn)?;
 
     Ok(())
 }
@@ -360,6 +361,55 @@ fn add_memes_fts_index(conn: &mut Connection) -> Result<(), String> {
         }
     }
     tx.commit().map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    println!("[MIGRATION] - {}:  Successfully finished!", migration_name);
+    Ok(())
+}
+
+fn add_user_reactions_table(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795440900_add_user_reactions_table".to_string();
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    println!(
+        "[MIGRATION] - {}: Creating user_reactions table and index...",
+        migration_name
+    );
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS user_reactions (
+            user_id BIGINT NOT NULL,
+            meme_id BIGINT NOT NULL,
+            reaction TEXT NOT NULL CHECK (reaction IN ('like', 'dislike', 'skip')),
+            created_at BIGINT NOT NULL,
+            PRIMARY KEY (user_id, meme_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_user_reactions_lookup
+            ON user_reactions(user_id, reaction);
+        ",
+    )
+    .map_err(|e| e.to_string())?;
 
     let now = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)

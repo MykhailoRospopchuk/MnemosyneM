@@ -618,14 +618,14 @@ Meme ID: 1793041234
     - [ ] Implement `/tags` command displaying all categories with live meme counts (`#category (N)`).
     - [ ] Add interactive Inline buttons on `/tags` to trigger one-tap inline search for selected tag.
     - [ ] Support combined tag filtering in inline queries (`@MnemosyneM_bot #work deadline`).
-  - [ ] Native Telegram Meme Tinder & Reactions (`/tinder`):
-    - [ ] SQLite schema `user_reactions (user_id, meme_id, reaction, created_at)` for `'like'`, `'skip'`, `'dislike'`.
-    - [ ] Interactive `/tinder` UI: send photo with single-row layout: equal-sized `[ ❤️ Лайк ]` & `[ ⏭️ Скіп ]` and smaller `[ 👎 ]` in the middle.
-    - [ ] Zero chat spam: update next meme in-place via `edit_message_media`.
-    - [ ] Decouple Likes from Personal Collection: likes populate `/liked` feed without cluttering personal `user_memes`.
+  - [x] Native Telegram Meme Tinder & Reactions (`/tinder` & `/liked`):
+    - [x] SQLite schema `user_reactions (user_id, meme_id, reaction, created_at)` for `'like'`, `'skip'`, `'dislike'`.
+    - [x] Interactive `/tinder` UI: send photo/GIF with single-row layout `[ ❤️ Лайк ]`, `[ 👎 ]`, `[ ⏭️ Скіп ]` (+ skip reset button when exhausted).
+    - [x] Zero chat spam: update next meme in-place via `edit_message_media`.
+    - [x] Decouple Likes from Personal Collection: likes populate `/liked` feed (with `[ 📥 Зберегти в мої меми ]` option) without cluttering personal `user_memes`.
   - [x] Persistent Reply Keyboard (`KeyboardMarkup`):
     - [x] Build multi-row keyboard with `resize_keyboard()` and `persistent()` for one-tap thumb navigation.
-    - [x] Map button text directly into bot command dispatcher (`🎲 Випадковий мем`, `📊 Статистика`, `⚙️ Налаштування`, `❓ Допомога`; expand with Tinder/Liked/Tags as those ship).
+    - [x] Map button text directly into bot command dispatcher (`🔥 Мем-Тіндер`, `🎲 Випадковий мем`, `❤️ Вподобані`, `📊 Статистика`, `⚙️ Налаштування`, `❓ Допомога`).
   - [x] GIF & Video Animation Support (`media_type: MediaType::Animation`):
     - [x] Telegram `Message::Animation` ingestion handler in `bot/handlers.rs`.
     - [x] Gemini VLM MP4 multimodal video analysis (`inline_data` with `video/mp4`).

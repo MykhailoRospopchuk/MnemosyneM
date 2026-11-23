@@ -1,5 +1,6 @@
 pub mod comand;
 pub mod handlers;
+pub mod tinder;
 
 use crate::AppState;
 use crate::config::AppConfig;
@@ -96,7 +97,14 @@ pub async fn message_handler(
     } else if let Some(animation) = msg.animation() {
         handlers::handle_animation(&bot, &msg, animation, state, &sender).await?;
     } else if let Some(text) = msg.text() {
+        let user_id = msg
+            .from
+            .as_ref()
+            .map(|u| u.id.0 as i64)
+            .unwrap_or(msg.chat.id.0);
+
         if text.starts_with('/') {
+            comand::clear_pending_reset(&state, user_id).await;
             match Command::parse(text, "") {
                 Ok(Command::Start) => {
                     comand::start(bot, msg).await?;
@@ -113,6 +121,12 @@ pub async fn message_handler(
                 Ok(Command::Settings) => {
                     comand::settings(bot, msg, state).await?;
                 }
+                Ok(Command::Tinder) => {
+                    tinder::cmd_tinder(bot, msg, state).await?;
+                }
+                Ok(Command::Liked) => {
+                    tinder::cmd_liked(bot, msg, state).await?;
+                }
                 Err(_) => {
                     comand::error(bot, msg).await?;
                 }
@@ -120,7 +134,28 @@ pub async fn message_handler(
             return Ok(());
         }
 
-        match text.trim() {
+        let trimmed = text.trim();
+        if matches!(
+            trimmed,
+            comand::BTN_TINDER
+                | comand::BTN_LIKED
+                | comand::BTN_RANDOM
+                | comand::BTN_STATS
+                | comand::BTN_SETTINGS
+                | comand::BTN_HELP
+        ) {
+            comand::clear_pending_reset(&state, user_id).await;
+        }
+
+        match trimmed {
+            comand::BTN_TINDER => {
+                tinder::cmd_tinder(bot, msg, state).await?;
+                return Ok(());
+            }
+            comand::BTN_LIKED => {
+                tinder::cmd_liked(bot, msg, state).await?;
+                return Ok(());
+            }
             comand::BTN_RANDOM => {
                 comand::random(bot, msg, state).await?;
                 return Ok(());
@@ -140,6 +175,10 @@ pub async fn message_handler(
             _ => {}
         }
 
+        if comand::try_handle_pending_reset(&bot, &msg, text, &state).await? {
+            return Ok(());
+        }
+
         handlers::handle_search(&bot, &msg, text, &state, app_config).await?;
     }
     Ok(())
@@ -152,42 +191,14 @@ pub async fn callback_handler(
     check_user(callback_query.from.clone(), &state).await;
 
     if let Some(data) = callback_query.data.clone() {
-        let user_id = callback_query.from.id.0 as i64;
-
-        let (text, keyboard) = {
-            let mut meme_store = state.meme_store.lock().await;
-            match data.as_str() {
-                "toggle_upload" => {
-                    if let Err(e) = meme_store.toggle_upload_mode(user_id) {
-                        eprintln!("[ERROR] toggle_upload_mode failed: {}", e)
-                    };
-                }
-                "cycle_scope" => {
-                    if let Err(e) = meme_store.cycle_search_scope(user_id) {
-                        eprintln!("[ERROR] cycle_search_scope failed: {}", e)
-                    };
-                }
-                _ => {}
-            }
-
-            let settings = meme_store.get_user_settings(user_id);
-            comand::format_settings(&settings)
-        };
-
-        let callback_query_id = callback_query.id.clone();
-
-        if let Err(e) = bot.answer_callback_query(callback_query_id).await {
-            eprintln!("[WARN] Failed to answer callback query: {}", e);
-        };
-
-        if let Some(msg) = callback_query.regular_message()
-            && let Err(e) = bot
-                .edit_message_text(msg.chat.id, msg.id, text)
-                .reply_markup(keyboard)
-                .await
-        {
-            eprintln!("[WARN] Failed to edit message: {}", e);
+        if data.starts_with("tinder:") {
+            return tinder::handle_tinder_callback(bot, callback_query, state, &data).await;
         }
+        if data.starts_with("liked:") {
+            return tinder::handle_liked_callback(bot, callback_query, state, &data).await;
+        }
+
+        return comand::handle_settings_callback(bot, callback_query, state, &data).await;
     }
     Ok(())
 }
