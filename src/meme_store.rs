@@ -93,6 +93,20 @@ pub struct TagCandidate {
     pub description_en: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemeCardInfo {
+    pub user_is_public: bool,
+    pub effective_is_public: bool,
+    pub tags: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeleteMemeOutcome {
+    DeletedCompletely,
+    RemovedFromCollection,
+    NotFoundOrNotOwner,
+}
+
 struct FtsHit {
     bm25_score: f32,
     matched_terms: usize,
@@ -154,7 +168,7 @@ impl MemeStore {
         &mut self,
         new_meme: NewMeme<'_>,
         engine: &mut ClipEngine,
-    ) -> Result<(), String> {
+    ) -> Result<(u64, bool), String> {
         let passage_uk = format_embedding_passage(
             &new_meme.analysis.ocr_text,
             &new_meme.analysis.uk_description,
@@ -232,7 +246,16 @@ impl MemeStore {
                 new_meme.user_id, upserted_id, new_meme.title, is_public, now
             ]).map_err(|e| e.to_string())?;
 
-        let meme = Meme {
+        let effective_public: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_memes WHERE meme_id = ? AND is_public = 1)",
+                params![upserted_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        let mut meme = Meme {
             id: upserted_id,
             title: new_meme.title.clone(),
             ocr_text: new_meme.analysis.ocr_text.clone(),
@@ -242,7 +265,7 @@ impl MemeStore {
             file_tg_unique_id: new_meme.file_tg_unique_id,
             source_title: new_meme.source_title,
             source_url: new_meme.source_url,
-            is_public,
+            is_public: effective_public,
             owners: vec![new_meme.user_id],
             phash: new_meme.phash,
             media_type: new_meme.media_type,
@@ -255,6 +278,12 @@ impl MemeStore {
             .iter_mut()
             .find(|x| x.file_tg_unique_id == meme.file_tg_unique_id)
         {
+            let mut merged_owners = std::mem::take(&mut item.owners);
+            if !merged_owners.contains(&new_meme.user_id) {
+                merged_owners.push(new_meme.user_id);
+            }
+            meme.owners = merged_owners;
+            meme.tags = std::mem::take(&mut item.tags);
             *item = meme;
         } else {
             self.memes.push(meme);
@@ -272,7 +301,7 @@ impl MemeStore {
         )
         .map_err(|e| e.to_string())?;
 
-        Ok(())
+        Ok((upserted_id, is_public))
     }
 
     pub fn len(&self, user_id: i64) -> (usize, usize) {
@@ -301,31 +330,213 @@ impl MemeStore {
     }
 
     pub fn random_meme(&self, user_id: i64) -> Option<&Meme> {
+        self.random_meme_excluding(user_id, None)
+    }
+
+    pub fn random_meme_excluding(
+        &self,
+        user_id: i64,
+        exclude_meme_id: Option<u64>,
+    ) -> Option<&Meme> {
         if self.is_empty() {
             return None;
         }
-        let matching_memes = self
+
+        let settings = self.get_user_settings(user_id);
+        let mut disliked_ids: HashSet<u64> = HashSet::new();
+        if let Ok(mut stmt) = self.conn.prepare(
+            "SELECT meme_id FROM user_reactions WHERE user_id = ? AND reaction = 'dislike'",
+        ) && let Ok(rows) = stmt.query_map(params![user_id], |row| row.get::<_, u64>(0))
+        {
+            for id in rows.flatten() {
+                disliked_ids.insert(id);
+            }
+        }
+
+        let mut candidates: Vec<&Meme> = self
             .memes
             .iter()
-            .filter(|m| m.is_visible_to(user_id, "all"));
+            .filter(|m| {
+                !m.file_tg_id.is_empty()
+                    && m.is_visible_to(user_id, &settings.search_scope)
+                    && !disliked_ids.contains(&m.id)
+            })
+            .collect();
 
-        let count_matched = matching_memes.clone().count();
-
-        if count_matched == 0 {
+        if candidates.is_empty() {
             return None;
         }
 
+        if let Some(ex) = exclude_meme_id
+            && candidates.len() > 1
+        {
+            candidates.retain(|m| m.id != ex);
+        }
+
+        let mut hasher = RandomState::new().build_hasher();
         let nanos = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .subsec_nanos() as usize;
+            .as_nanos() as u64;
+        hasher.write_u64(nanos);
+        let idx = (hasher.finish() as usize) % candidates.len();
+        Some(candidates[idx])
+    }
 
-        let idx = nanos % count_matched;
+    pub fn get_meme_card_info(&self, user_id: i64, meme_id: u64) -> Option<MemeCardInfo> {
+        let user_is_public: bool = self
+            .conn
+            .query_row(
+                "SELECT is_public FROM user_memes WHERE user_id = ? AND meme_id = ?",
+                params![user_id, meme_id],
+                |row| row.get(0),
+            )
+            .ok()?;
 
-        self.memes
+        let meme = self.memes.iter().find(|m| m.id == meme_id)?;
+
+        let mut emoji_map: HashMap<String, String> = HashMap::new();
+        if let Ok(mut stmt) = self.conn.prepare("SELECT name, emoji FROM tags")
+            && let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+        {
+            for (name, emoji) in rows.flatten() {
+                emoji_map.insert(name, emoji);
+            }
+        }
+
+        let tags = meme
+            .tags
             .iter()
-            .filter(|i| i.is_visible_to(user_id, "all"))
-            .nth(idx)
+            .map(|slug| {
+                let emoji = emoji_map
+                    .get(slug)
+                    .cloned()
+                    .unwrap_or_else(|| tag_emoji(slug).to_string());
+                (slug.clone(), emoji)
+            })
+            .collect();
+
+        Some(MemeCardInfo {
+            user_is_public,
+            effective_is_public: meme.is_public,
+            tags,
+        })
+    }
+
+    pub fn set_user_meme_visibility(
+        &mut self,
+        user_id: i64,
+        meme_id: u64,
+        is_public: bool,
+    ) -> Result<Option<MemeCardInfo>, String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE user_memes SET is_public = ? WHERE user_id = ? AND meme_id = ?",
+                params![is_public, user_id, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if updated == 0 {
+            return Ok(None);
+        }
+
+        let effective_public: bool = self
+            .conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_memes WHERE meme_id = ? AND is_public = 1)",
+                params![meme_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            meme.is_public = effective_public;
+        }
+
+        Ok(self.get_meme_card_info(user_id, meme_id))
+    }
+
+    pub fn delete_user_meme(
+        &mut self,
+        user_id: i64,
+        meme_id: u64,
+    ) -> Result<DeleteMemeOutcome, String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        let removed = tx
+            .execute(
+                "DELETE FROM user_memes WHERE user_id = ? AND meme_id = ?",
+                params![user_id, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if removed == 0 {
+            return Ok(DeleteMemeOutcome::NotFoundOrNotOwner);
+        }
+
+        let remaining: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM user_memes WHERE meme_id = ?",
+                params![meme_id],
+                |row| row.get(0),
+            )
+            .map_err(|e| e.to_string())?;
+
+        if remaining == 0 {
+            tx.execute("DELETE FROM memes WHERE id = ?", params![meme_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM memes_fts WHERE rowid = ?",
+                params![meme_id as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM meme_tags WHERE meme_id = ?",
+                params![meme_id as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM user_reactions WHERE meme_id = ?",
+                params![meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "DELETE FROM user_delivered_memes WHERE meme_id = ?",
+                params![meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+            tx.commit().map_err(|e| e.to_string())?;
+            self.memes.retain(|m| m.id != meme_id);
+            Ok(DeleteMemeOutcome::DeletedCompletely)
+        } else {
+            let effective_public: bool = tx
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM user_memes WHERE meme_id = ? AND is_public = 1)",
+                    params![meme_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+
+            tx.commit().map_err(|e| e.to_string())?;
+            if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+                meme.owners.retain(|&uid| uid != user_id);
+                meme.is_public = effective_public;
+            }
+            Ok(DeleteMemeOutcome::RemovedFromCollection)
+        }
+    }
+
+    pub fn is_meme_liked(&self, user_id: i64, meme_id: u64) -> bool {
+        self.conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM user_reactions WHERE user_id = ? AND meme_id = ? AND reaction = 'like')",
+                params![user_id, meme_id],
+                |row| row.get(0),
+            )
+            .unwrap_or(false)
     }
 
     pub fn open(db_connection: &str) -> Result<Self, String> {
@@ -2627,5 +2838,154 @@ mod tests {
         );
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].0.id, 2);
+    }
+
+    #[test]
+    fn user_meme_visibility_toggle_and_ownership_checks() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "один", "Опис", "Desc", "", vec![1.0, 0.0]);
+        store.memes[0].is_public = true;
+        store.memes[0].owners = vec![10, 20];
+        store
+            .conn
+            .execute(
+                "INSERT INTO user_memes (user_id, meme_id, user_captions, is_public, created_at) VALUES (10, 1, '', 1, 100), (20, 1, '', 0, 101)",
+                [],
+            )
+            .unwrap();
+        store
+            .set_meme_tags(1, &[("айті".to_string(), 0.9)], 1)
+            .unwrap();
+
+        // Non-owner gets None
+        assert!(store.get_meme_card_info(999, 1).is_none());
+        assert!(
+            store
+                .set_user_meme_visibility(999, 1, true)
+                .unwrap()
+                .is_none()
+        );
+
+        // User 20 sees their personal flag = false, effective = true (because user 10 is public)
+        let card20 = store.get_meme_card_info(20, 1).unwrap();
+        assert!(!card20.user_is_public);
+        assert!(card20.effective_is_public);
+        assert_eq!(card20.tags, vec![("айті".to_string(), "💻".to_string())]);
+
+        // User 10 toggles private -> both personal and effective become false
+        let card10 = store.set_user_meme_visibility(10, 1, false).unwrap().unwrap();
+        assert!(!card10.user_is_public);
+        assert!(!card10.effective_is_public);
+        assert!(!store.memes[0].is_public);
+
+        // User 20 toggles public -> user 20 and effective become true
+        let card20_pub = store.set_user_meme_visibility(20, 1, true).unwrap().unwrap();
+        assert!(card20_pub.user_is_public);
+        assert!(card20_pub.effective_is_public);
+        assert!(store.memes[0].is_public);
+    }
+
+    #[test]
+    fn delete_user_meme_handles_single_and_shared_ownership() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 42, "текст", "опис", "desc", "", vec![1.0, 0.0]);
+        store.memes[0].is_public = true;
+        store.memes[0].owners = vec![1, 2];
+        store
+            .conn
+            .execute(
+                "INSERT INTO user_memes (user_id, meme_id, user_captions, is_public, created_at) VALUES (1, 42, '', 1, 100), (2, 42, '', 0, 101)",
+                [],
+            )
+            .unwrap();
+        store
+            .set_meme_tags(42, &[("коти".to_string(), 0.9)], 1)
+            .unwrap();
+        store.record_reaction(2, 42, "like").unwrap();
+        store.record_delivered_meme(2, 42, 500).unwrap();
+
+        // Stranger cannot delete
+        assert_eq!(
+            store.delete_user_meme(99, 42).unwrap(),
+            DeleteMemeOutcome::NotFoundOrNotOwner
+        );
+
+        // Owner 1 deletes -> removed from user 1 only, effective visibility drops to false
+        assert_eq!(
+            store.delete_user_meme(1, 42).unwrap(),
+            DeleteMemeOutcome::RemovedFromCollection
+        );
+        assert_eq!(store.memes.len(), 1);
+        assert_eq!(store.memes[0].owners, vec![2]);
+        assert!(!store.memes[0].is_public);
+
+        // Last owner 2 deletes -> deleted from memes, FTS, meme_tags, reactions, deliveries, memory
+        assert_eq!(
+            store.delete_user_meme(2, 42).unwrap(),
+            DeleteMemeOutcome::DeletedCompletely
+        );
+        assert!(store.memes.is_empty());
+
+        for (table, col) in [
+            ("memes", "id"),
+            ("memes_fts", "rowid"),
+            ("meme_tags", "meme_id"),
+            ("user_reactions", "meme_id"),
+            ("user_delivered_memes", "meme_id"),
+        ] {
+            let count: i64 = store
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {} WHERE {} = 42", table, col),
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "expected 0 rows remaining in {}", table);
+        }
+    }
+
+    #[test]
+    fn random_meme_excludes_disliked_respects_scope_and_skips_excluded_id() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "a", "a", "a", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "b", "b", "b", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "c", "c", "c", "", vec![1.0, 0.0]);
+
+        store.memes[0].is_public = true;
+        store.memes[0].owners = vec![100];
+        store.memes[1].is_public = false;
+        store.memes[1].owners = vec![1];
+        store.memes[2].is_public = false;
+        store.memes[2].owners = vec![200];
+
+        // User 1 in "all" sees 1 (public) and 2 (private owned by 1), not 3 (private owned by 200)
+        store.record_reaction(1, 1, "dislike").unwrap();
+        let picked = store.random_meme(1).unwrap();
+        assert_eq!(picked.id, 2);
+
+        // Excluding the only remaining candidate (2) still returns 2 as last fallback
+        assert_eq!(store.random_meme_excluding(1, Some(2)).unwrap().id, 2);
+
+        // When both 1 and 2 are available and 1 is excluded, always picks 2
+        store.remove_reaction(1, 1).unwrap();
+        for _ in 0..5 {
+            assert_eq!(store.random_meme_excluding(1, Some(1)).unwrap().id, 2);
+        }
+
+        // Switching scope to private_only restricts to meme 2; disliking 2 yields None
+        store
+            .save_users_settings(UserSetting {
+                user_id: 1,
+                username: String::new(),
+                first_name: String::new(),
+                last_name: String::new(),
+                upload_as_public: true,
+                search_scope: "private_only".to_string(),
+            })
+            .unwrap();
+        assert_eq!(store.random_meme(1).unwrap().id, 2);
+        store.record_reaction(1, 2, "dislike").unwrap();
+        assert!(store.random_meme(1).is_none());
     }
 }

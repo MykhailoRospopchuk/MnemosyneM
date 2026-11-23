@@ -62,7 +62,7 @@ pub(crate) fn format_source_html(meme: &Meme) -> String {
     }
 }
 
-fn build_input_media(meme: &Meme, caption: String) -> InputMedia {
+pub(crate) fn build_input_media(meme: &Meme, caption: String) -> InputMedia {
     let file = InputFile::file_id(FileId(meme.file_tg_id.clone()));
     match meme.media_type {
         MediaType::Photo => InputMedia::Photo(
@@ -78,7 +78,7 @@ fn build_input_media(meme: &Meme, caption: String) -> InputMedia {
     }
 }
 
-async fn send_meme_with_markup(
+pub(crate) async fn send_meme_with_markup(
     bot: &Bot,
     chat_id: ChatId,
     meme: &Meme,

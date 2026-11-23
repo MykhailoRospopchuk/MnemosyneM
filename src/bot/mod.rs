@@ -1,6 +1,7 @@
 pub mod comand;
 pub mod drip;
 pub mod handlers;
+pub mod meme_actions;
 pub mod tinder;
 
 use crate::AppState;
@@ -219,6 +220,12 @@ pub async fn callback_handler(
         }
         if data.starts_with("drip:") {
             return drip::handle_drip_callback(bot, callback_query, state, &data).await;
+        }
+        if data.starts_with("meme:") {
+            return meme_actions::handle_meme_callback(bot, callback_query, state, &data).await;
+        }
+        if data.starts_with("random:") {
+            return comand::handle_random_callback(bot, callback_query, state, &data).await;
         }
 
         return comand::handle_settings_callback(bot, callback_query, state, &data).await;

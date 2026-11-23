@@ -7,17 +7,16 @@ use teloxide::Bot;
 use teloxide::RequestError;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatId, FileId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, KeyboardButton,
-    KeyboardMarkup, Message, MessageId,
+    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, KeyboardMarkup, Message,
+    MessageId,
 };
 use teloxide::utils::command::BotCommands;
 use tokio::sync::mpsc::Sender;
 use tracing::{error, warn};
 
 use crate::AppState;
-use crate::bot::handlers::build_caption;
 use crate::config::AppConfig;
-use crate::database::entity::media_type::MediaType;
+use crate::database::entity::meme::Meme;
 use crate::database::entity::user_setting::UserSetting;
 use crate::database::enums::command_enum::Command;
 use crate::meme_store::UserReactionCounts;
@@ -245,54 +244,165 @@ pub async fn stats(
     Ok(message)
 }
 
-pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Message, RequestError> {
-    let meme = {
-        let meme_store = state.meme_store.lock().await;
-        meme_store.random_meme(msg.chat.id.0).cloned()
+fn random_caption(meme: &Meme) -> String {
+    format!(
+        "🎲 Випадковий мем{}",
+        crate::bot::tinder::format_source_html(meme)
+    )
+}
+
+fn random_keyboard(meme_id: u64, liked: bool) -> InlineKeyboardMarkup {
+    let like_btn = if liked {
+        InlineKeyboardButton::callback("💖 Вподобано", format!("random:unlike:{}", meme_id))
+    } else {
+        InlineKeyboardButton::callback("❤️ Лайк", format!("random:like:{}", meme_id))
     };
 
-    let message: Message;
-    if let Some(meme) = meme {
-        if !meme.file_tg_id.is_empty() {
-            let captions = format!(
-                "🎲 Random meme | {}",
-                build_caption(&meme.source_title, &meme.source_url, &1.0)
-            );
-            match meme.media_type {
-                MediaType::Photo => {
-                    message = bot
-                        .send_photo(
-                            msg.chat.id,
-                            InputFile::file_id(FileId(meme.file_tg_id.clone())),
-                        )
-                        .caption(captions)
-                        .await?;
-                }
-                MediaType::Animation => {
-                    message = bot
-                        .send_animation(
-                            msg.chat.id,
-                            InputFile::file_id(FileId(meme.file_tg_id.clone())),
-                        )
-                        .caption(captions)
-                        .await?;
+    InlineKeyboardMarkup::new(vec![vec![
+        like_btn,
+        InlineKeyboardButton::callback("👎", format!("random:dislike:{}", meme_id)),
+        InlineKeyboardButton::callback("🎲 Ще", format!("random:next:{}", meme_id)),
+    ]])
+}
+
+pub async fn random(bot: Bot, msg: Message, state: Arc<AppState>) -> Result<Message, RequestError> {
+    let user_id = msg.chat.id.0;
+    let (meme_opt, liked) = {
+        let meme_store = state.meme_store.lock().await;
+        let meme = meme_store.random_meme(user_id).cloned();
+        let liked = meme
+            .as_ref()
+            .is_some_and(|m| meme_store.is_meme_liked(user_id, m.id));
+        (meme, liked)
+    };
+
+    if let Some(meme) = meme_opt {
+        crate::bot::tinder::send_meme_with_markup(
+            &bot,
+            msg.chat.id,
+            &meme,
+            random_caption(&meme),
+            random_keyboard(meme.id, liked),
+        )
+        .await
+    } else {
+        bot.send_message(
+            msg.chat.id,
+            "🎲 Немає доступних мемів (база порожня або всі меми в поточному режимі дизлайкнуті — перевір /settings).",
+        )
+        .await
+    }
+}
+
+pub async fn handle_random_callback(
+    bot: Bot,
+    callback_query: CallbackQuery,
+    state: Arc<AppState>,
+    data: &str,
+) -> ResponseResult<()> {
+    let user_id = callback_query.from.id.0 as i64;
+    let callback_id = callback_query.id.clone();
+
+    let mut parts = data.splitn(3, ':');
+    let _prefix = parts.next();
+    let Some(action) = parts.next() else {
+        let _ = bot.answer_callback_query(callback_id).await;
+        return Ok(());
+    };
+    let Some(meme_id) = parts.next().and_then(|s| s.parse::<u64>().ok()) else {
+        let _ = bot.answer_callback_query(callback_id).await;
+        return Ok(());
+    };
+
+    match action {
+        "like" | "unlike" => {
+            let set_liked = action == "like";
+            {
+                let store = state.meme_store.lock().await;
+                let res = if set_liked {
+                    store.record_reaction(user_id, meme_id, "like")
+                } else {
+                    store.remove_reaction(user_id, meme_id)
+                };
+                if let Err(e) = res {
+                    error!(user_id, meme_id, action, error = %e, "Failed to update random meme like reaction");
                 }
             }
-        } else {
-            message = bot
-                .send_message(msg.chat.id, "Sorry your meme somebody stole(((")
-                .await?;
+
+            if let Err(e) = bot.answer_callback_query(callback_id).await {
+                warn!(user_id, meme_id, error = %e, "Failed to answer random like callback");
+            }
+
+            if let Some(msg) = callback_query.regular_message()
+                && let Err(e) = bot
+                    .edit_message_reply_markup(msg.chat.id, msg.id)
+                    .reply_markup(random_keyboard(meme_id, set_liked))
+                    .await
+                && !e.to_string().contains("message is not modified")
+            {
+                warn!(user_id, meme_id, error = %e, "Failed to refresh random meme markup");
+            }
         }
-    } else {
-        message = bot
-            .send_message(
-                msg.chat.id,
-                "What do yue even expect? Upload at least one meme",
-            )
-            .await?;
+        "dislike" | "next" => {
+            let (next_meme, liked) = {
+                let store = state.meme_store.lock().await;
+                if action == "dislike"
+                    && let Err(e) = store.record_reaction(user_id, meme_id, "dislike")
+                {
+                    error!(user_id, meme_id, error = %e, "Failed to record random dislike reaction");
+                }
+                let next = store
+                    .random_meme_excluding(user_id, Some(meme_id))
+                    .cloned();
+                let liked = next
+                    .as_ref()
+                    .is_some_and(|m| store.is_meme_liked(user_id, m.id));
+                (next, liked)
+            };
+
+            if let Err(e) = bot.answer_callback_query(callback_id).await {
+                warn!(user_id, meme_id, error = %e, "Failed to answer random navigation callback");
+            }
+
+            if let Some(msg) = callback_query.regular_message() {
+                match next_meme {
+                    Some(meme) => {
+                        if let Err(e) = bot
+                            .edit_message_media(
+                                msg.chat.id,
+                                msg.id,
+                                crate::bot::tinder::build_input_media(
+                                    &meme,
+                                    random_caption(&meme),
+                                ),
+                            )
+                            .reply_markup(random_keyboard(meme.id, liked))
+                            .await
+                            && !e.to_string().contains("message is not modified")
+                        {
+                            warn!(user_id, meme_id = meme.id, error = %e, "Failed to edit random media");
+                        }
+                    }
+                    None => {
+                        if let Err(e) = bot
+                            .edit_message_caption(msg.chat.id, msg.id)
+                            .caption("🎲 Більше немає доступних мемів — усі в поточній вибірці дизлайкнуті. Можеш скинути дизлайки в /settings.")
+                            .reply_markup(InlineKeyboardMarkup::default())
+                            .await
+                            && !e.to_string().contains("message is not modified")
+                        {
+                            warn!(user_id, error = %e, "Failed to edit exhausted random caption");
+                        }
+                    }
+                }
+            }
+        }
+        _ => {
+            let _ = bot.answer_callback_query(callback_id).await;
+        }
     }
 
-    Ok(message)
+    Ok(())
 }
 
 pub async fn error(bot: Bot, msg: Message) -> Result<Message, RequestError> {

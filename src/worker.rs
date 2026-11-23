@@ -15,7 +15,7 @@ use teloxide::{
     Bot,
     payloads::SendMessageSetters,
     requests::Requester,
-    types::{ChatId, MessageId, ReplyParameters},
+    types::{ChatId, InlineKeyboardMarkup, MessageId, ReplyParameters},
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 use tracing::{debug, error, info, warn};
@@ -40,6 +40,20 @@ async fn reply_to_job(bot: &Bot, chat_id: ChatId, message_id: MessageId, text: i
     let _ = bot
         .send_message(chat_id, text)
         .reply_parameters(ReplyParameters::new(message_id).allow_sending_without_reply())
+        .await;
+}
+
+async fn reply_to_job_with_markup(
+    bot: &Bot,
+    chat_id: ChatId,
+    message_id: MessageId,
+    text: impl Into<String>,
+    keyboard: InlineKeyboardMarkup,
+) {
+    let _ = bot
+        .send_message(chat_id, text)
+        .reply_parameters(ReplyParameters::new(message_id).allow_sending_without_reply())
+        .reply_markup(keyboard)
         .await;
 }
 
@@ -319,11 +333,11 @@ pub fn start_worker(
             };
 
             match save_result {
-                Ok(()) => {
+                Ok((saved_id, initial_is_public)) => {
                     info!(
                         user_id,
                         username,
-                        meme_id = id,
+                        meme_id = saved_id,
                         file_unique_id = %file_unique_id,
                         "Meme saved to SQLite"
                     );
@@ -350,19 +364,19 @@ pub fn start_worker(
                             };
                             let tag_save_res = {
                                 let mut meme_store = state.meme_store.lock().await;
-                                meme_store.set_meme_tags(id, &res.tags, tags_version)
+                                meme_store.set_meme_tags(saved_id, &res.tags, tags_version)
                             };
                             match tag_save_res {
                                 Ok(()) => info!(
                                     user_id,
-                                    meme_id = id,
+                                    meme_id = saved_id,
                                     tags_count,
                                     is_undetermined = res.is_undetermined,
                                     "Auto-tagged newly uploaded meme"
                                 ),
                                 Err(e) => warn!(
                                     user_id,
-                                    meme_id = id,
+                                    meme_id = saved_id,
                                     error = %e,
                                     "Failed to save tags for newly uploaded meme"
                                 ),
@@ -371,19 +385,33 @@ pub fn start_worker(
                         Err(e) => {
                             warn!(
                                 user_id,
-                                meme_id = id,
+                                meme_id = saved_id,
                                 error = ?e,
                                 "Failed to auto-tag new meme; maintenance worker will backfill"
                             );
                         }
                     }
-                    reply_to_job(
-                        &bot,
-                        job.chat_id,
-                        job.message_id,
-                        "[V] Your meme has been confiscated...",
-                    )
-                    .await;
+
+                    let card_info = {
+                        let meme_store = state.meme_store.lock().await;
+                        meme_store.get_meme_card_info(user_id, saved_id)
+                    };
+                    let (user_pub, eff_pub, card_tags) = match card_info {
+                        Some(info) => (
+                            info.user_is_public,
+                            info.effective_is_public,
+                            info.tags,
+                        ),
+                        None => (initial_is_public, initial_is_public, Vec::new()),
+                    };
+                    let (card_text, card_kb) = crate::bot::meme_actions::format_uploaded_meme_card(
+                        saved_id,
+                        user_pub,
+                        eff_pub,
+                        &card_tags,
+                    );
+                    reply_to_job_with_markup(&bot, job.chat_id, job.message_id, card_text, card_kb)
+                        .await;
                 }
                 Err(e) => {
                     error!(
