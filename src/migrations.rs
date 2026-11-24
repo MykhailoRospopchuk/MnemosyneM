@@ -11,6 +11,19 @@ use crate::helpers::embeding_helper;
 pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     let mut conn = Connection::open(dp_path).map_err(|e| e.to_string())?;
 
+    let has_memes_table: bool = conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memes'",
+            [],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if !has_memes_table {
+        info!("Fresh database detected (no memes table yet); skipping legacy migrations");
+        return Ok(());
+    }
+
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS _migrations (

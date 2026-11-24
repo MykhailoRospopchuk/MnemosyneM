@@ -118,6 +118,12 @@ pub async fn message_handler(
         }
     } else if let Some(animation) = msg.animation() {
         handlers::handle_animation(&bot, &msg, animation, state, &sender).await?;
+    } else if msg.document().is_some()
+        && msg
+            .caption()
+            .is_some_and(|c| c.trim() == "/restore" || c.trim().starts_with("/restore "))
+    {
+        admin::cmd_restore(bot, msg, app_config).await?;
     } else if let Some(text) = msg.text() {
         let user_id = msg
             .from
@@ -134,6 +140,10 @@ pub async fn message_handler(
             }
             if trimmed_cmd == "/backup" || trimmed_cmd.starts_with("/backup ") {
                 admin::cmd_backup(bot, msg, state, app_config).await?;
+                return Ok(());
+            }
+            if trimmed_cmd == "/restore" || trimmed_cmd.starts_with("/restore ") {
+                admin::cmd_restore(bot, msg, app_config).await?;
                 return Ok(());
             }
             match Command::parse(text, "") {
