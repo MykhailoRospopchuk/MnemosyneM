@@ -14,9 +14,13 @@ impl RerankerEngine {
         if let Ok(cache_dir) = std::env::var("FASTEMBED_CACHE_DIR")
             && !cache_dir.trim().is_empty()
         {
-            options = options.with_cache_dir(PathBuf::from(cache_dir));
+            let path = PathBuf::from(&cache_dir);
+            if let Err(e) = std::fs::create_dir_all(&path) {
+                return Err(format!("Failed to create FASTEMBED_CACHE_DIR '{}': {}", cache_dir, e));
+            }
+            options = options.with_cache_dir(path);
         }
-        let model = TextRerank::try_new(options).map_err(|e| e.to_string())?;
+        let model = TextRerank::try_new(options).map_err(|e| format!("{:?}", e))?;
         Ok(Self { model })
     }
 
