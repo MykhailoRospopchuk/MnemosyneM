@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-FROM rust:1-bookworm AS builder
+FROM rust:1-trixie AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config \
@@ -24,7 +24,7 @@ COPY src ./src
 RUN touch src/main.rs src/lib.rs \
     && cargo build --release --bin m_nemosyne_m
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
