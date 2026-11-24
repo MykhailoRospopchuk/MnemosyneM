@@ -132,6 +132,10 @@ pub async fn message_handler(
                 admin::cmd_admin(bot, msg, state, app_config).await?;
                 return Ok(());
             }
+            if trimmed_cmd == "/backup" || trimmed_cmd.starts_with("/backup ") {
+                admin::cmd_backup(bot, msg, state, app_config).await?;
+                return Ok(());
+            }
             match Command::parse(text, "") {
                 Ok(Command::Start) => {
                     comand::start(bot, msg).await?;

@@ -4,7 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use teloxide::Bot;
 use teloxide::prelude::*;
 use teloxide::types::{
-    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, MessageId, ParseMode, ReplyParameters,
+    ChatId, InlineKeyboardButton, InlineKeyboardMarkup, InputFile, MessageId, ParseMode,
+    ReplyParameters,
 };
 use tracing::{error, info, warn};
 
@@ -78,7 +79,10 @@ pub fn format_admin_dashboard(
                 "admin:tags:0",
             ),
         ],
-        vec![InlineKeyboardButton::callback("🔄 Оновити", "admin:home")],
+        vec![
+            InlineKeyboardButton::callback("💾 Бекап БД", "admin:backup"),
+            InlineKeyboardButton::callback("🔄 Оновити", "admin:home"),
+        ],
     ]);
 
     (text, kb)
@@ -374,6 +378,72 @@ pub async fn cmd_admin(
     Ok(())
 }
 
+async fn send_db_backup(bot: &Bot, chat_id: ChatId, state: Arc<AppState>) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let filename = format!("mnemosynem-backup-{}.db", ts);
+    let backup_path = std::env::temp_dir().join(&filename);
+
+    let snapshot_res = {
+        let store = state.meme_store.lock().await;
+        store.backup_to(&backup_path)
+    };
+
+    if let Err(e) = snapshot_res {
+        error!(chat_id = chat_id.0, error = %e, "Failed to create SQLite backup");
+        let _ = bot
+            .send_message(chat_id, format!("❌ Не вдалося створити бекап БД: {}", e))
+            .await;
+        let _ = std::fs::remove_file(&backup_path);
+        return;
+    }
+
+    let size_mb = std::fs::metadata(&backup_path)
+        .map(|m| m.len() as f64 / (1024.0 * 1024.0))
+        .unwrap_or(0.0);
+
+    let doc = InputFile::file(&backup_path).file_name(filename.clone());
+    match bot
+        .send_document(chat_id, doc)
+        .caption(format!("💾 Бекап БД ({:.2} MB)", size_mb))
+        .await
+    {
+        Ok(_) => info!(chat_id = chat_id.0, size_mb, "Sent SQLite backup to admin"),
+        Err(e) => {
+            error!(chat_id = chat_id.0, error = %e, "Failed to send SQLite backup document");
+            let _ = bot
+                .send_message(
+                    chat_id,
+                    format!("❌ Бекап створено ({:.2} MB), але не вдалося надіслати в Telegram: {}", size_mb, e),
+                )
+                .await;
+        }
+    }
+
+    let _ = std::fs::remove_file(&backup_path);
+}
+
+pub async fn cmd_backup(
+    bot: Bot,
+    msg: Message,
+    state: Arc<AppState>,
+    app_config: &'static AppConfig,
+) -> ResponseResult<()> {
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(msg.chat.id.0);
+    if !app_config.is_admin(user_id) {
+        bot.send_message(msg.chat.id, "⛔ Доступ лише для адміністратора.")
+            .await?;
+        return Ok(());
+    }
+
+    bot.send_message(msg.chat.id, "💾 Створюю знімок БД...")
+        .await?;
+    send_db_backup(&bot, msg.chat.id, state).await;
+    Ok(())
+}
+
 async fn send_or_edit_admin_media(
     bot: &Bot,
     msg: &Message,
@@ -420,6 +490,15 @@ pub async fn handle_admin_callback(
 
     let parts: Vec<&str> = data.split(':').collect();
     match parts.as_slice() {
+        ["admin", "backup"] => {
+            let _ = bot
+                .answer_callback_query(callback_id)
+                .text("💾 Створюю бекап БД...")
+                .await;
+            if let Some(msg) = callback_query.regular_message() {
+                send_db_backup(&bot, msg.chat.id, state).await;
+            }
+        }
         ["admin", "home"] => {
             let summary = {
                 let store = state.meme_store.lock().await;

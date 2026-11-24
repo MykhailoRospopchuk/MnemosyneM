@@ -1,0 +1,15 @@
+target/
+.fastembed_cache/
+.git/
+.idea/
+.env
+*.env
+*.db
+*.db-wal
+*.db-shm
+*.db.bak
+test_samples/
+docs/
+ROADMAP.md
+IDEAS.md
+README.md

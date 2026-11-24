@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use fastembed::{RerankInitOptions, RerankerModel, TextRerank};
 
 pub struct RerankerEngine {
@@ -6,9 +8,14 @@ pub struct RerankerEngine {
 
 impl RerankerEngine {
     pub fn new() -> Result<Self, String> {
-        let options = RerankInitOptions::new(RerankerModel::JINARerankerV2BaseMultiligual)
+        let mut options = RerankInitOptions::new(RerankerModel::JINARerankerV2BaseMultiligual)
             .with_max_length(256)
             .with_show_download_progress(true);
+        if let Ok(cache_dir) = std::env::var("FASTEMBED_CACHE_DIR")
+            && !cache_dir.trim().is_empty()
+        {
+            options = options.with_cache_dir(PathBuf::from(cache_dir));
+        }
         let model = TextRerank::try_new(options).map_err(|e| e.to_string())?;
         Ok(Self { model })
     }
