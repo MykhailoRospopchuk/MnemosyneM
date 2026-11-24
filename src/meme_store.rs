@@ -1761,6 +1761,39 @@ impl MemeStore {
         rows.flatten().collect()
     }
 
+    pub fn get_active_drip_subscriptions(&self) -> Vec<DripSubscription> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT user_id, chat_id, memes_per_day, tz_offset_hours, quiet_start_hour, quiet_end_hour, next_delivery_at, is_active
+             FROM meme_subscriptions
+             WHERE is_active = 1",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map([], map_drip_subscription_row) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn count_user_delivered_in_window(
+        &self,
+        user_id: i64,
+        start_secs: u64,
+        end_secs: u64,
+    ) -> usize {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM user_delivered_memes
+                 WHERE user_id = ? AND delivered_at >= ? AND delivered_at < ?",
+                params![user_id, start_secs as i64, end_secs as i64],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0)
+    }
+
     pub fn count_user_delivered_memes(&self, user_id: i64) -> usize {
         self.conn
             .query_row(
@@ -3196,6 +3229,63 @@ mod tests {
         // Pause subscription -> excluded from due subscriptions
         store.set_drip_active(user_id, false).unwrap();
         assert!(store.get_due_drip_subscriptions(1000).is_empty());
+    }
+
+    #[test]
+    fn drip_counts_deliveries_in_window_and_lists_active_subs() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 1, "m1", "опис 1", "desc 1", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 2, "m2", "опис 2", "desc 2", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 3, "m3", "опис 3", "desc 3", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 4, "m4", "опис 4", "desc 4", "", vec![1.0, 0.0]);
+
+        let active_user = 101;
+        let paused_user = 202;
+
+        store
+            .upsert_drip_subscription(&DripSubscription {
+                user_id: active_user,
+                chat_id: active_user,
+                memes_per_day: 3,
+                tz_offset_hours: 2,
+                quiet_start_hour: 23,
+                quiet_end_hour: 9,
+                next_delivery_at: 5000,
+                is_active: true,
+            })
+            .unwrap();
+        store
+            .upsert_drip_subscription(&DripSubscription {
+                user_id: paused_user,
+                chat_id: paused_user,
+                memes_per_day: 1,
+                tz_offset_hours: 2,
+                quiet_start_hour: 23,
+                quiet_end_hour: 9,
+                next_delivery_at: 5000,
+                is_active: false,
+            })
+            .unwrap();
+
+        let active_subs = store.get_active_drip_subscriptions();
+        assert_eq!(active_subs.len(), 1);
+        assert_eq!(active_subs[0].user_id, active_user);
+
+        // Window [1000, 2000): 999 excluded, 1000 included, 1999 included, 2000 excluded
+        store.record_delivered_meme(active_user, 1, 999).unwrap();
+        store.record_delivered_meme(active_user, 2, 1000).unwrap();
+        store.record_delivered_meme(active_user, 3, 1999).unwrap();
+        store.record_delivered_meme(active_user, 4, 2000).unwrap();
+        store.record_delivered_meme(paused_user, 1, 1500).unwrap();
+
+        assert_eq!(
+            store.count_user_delivered_in_window(active_user, 1000, 2000),
+            2
+        );
+        assert_eq!(
+            store.count_user_delivered_in_window(active_user, 999, 2001),
+            4
+        );
     }
 
     #[test]
