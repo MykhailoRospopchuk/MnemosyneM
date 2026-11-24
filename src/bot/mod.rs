@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod comand;
 pub mod drip;
 pub mod handlers;
@@ -126,6 +127,11 @@ pub async fn message_handler(
 
         if text.starts_with('/') {
             comand::clear_pending_reset(&state, user_id).await;
+            let trimmed_cmd = text.trim();
+            if trimmed_cmd == "/admin" || trimmed_cmd.starts_with("/admin ") {
+                admin::cmd_admin(bot, msg, state, app_config).await?;
+                return Ok(());
+            }
             match Command::parse(text, "") {
                 Ok(Command::Start) => {
                     comand::start(bot, msg).await?;
@@ -214,6 +220,7 @@ pub async fn callback_handler(
     bot: Bot,
     callback_query: CallbackQuery,
     state: Arc<AppState>,
+    app_config: &'static AppConfig,
 ) -> ResponseResult<()> {
     check_user(callback_query.from.clone(), &state).await;
 
@@ -235,6 +242,10 @@ pub async fn callback_handler(
         }
         if data.starts_with("random:") {
             return comand::handle_random_callback(bot, callback_query, state, &data).await;
+        }
+        if data.starts_with("admin:") {
+            return admin::handle_admin_callback(bot, callback_query, state, app_config, &data)
+                .await;
         }
 
         return comand::handle_settings_callback(bot, callback_query, state, &data).await;

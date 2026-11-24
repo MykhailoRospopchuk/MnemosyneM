@@ -30,6 +30,7 @@ pub fn run(dp_path: &str, engine: &mut ClipEngine) -> Result<(), String> {
     add_drip_subscription_tables(&mut conn)?;
     add_tags_tables(&mut conn)?;
     add_vlm_model_quota_table(&mut conn)?;
+    add_moderation_queue_table(&mut conn)?;
 
     Ok(())
 }
@@ -595,6 +596,64 @@ fn add_vlm_model_quota_table(conn: &mut Connection) -> Result<(), String> {
             last_reason TEXT NOT NULL DEFAULT '',
             updated_at INTEGER NOT NULL
         );
+        ",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    conn.execute(
+        "INSERT OR REPLACE INTO _migrations (name, executed_at) VALUES (?, ?)",
+        params![migration_name, now],
+    )
+    .map_err(|e| e.to_string())?;
+
+    info!(migration = %migration_name, "Migration finished successfully");
+    Ok(())
+}
+
+fn add_moderation_queue_table(conn: &mut Connection) -> Result<(), String> {
+    let migration_name = "1795462000_add_moderation_queue_table";
+
+    let already_applied: bool = conn
+        .query_row(
+            "SELECT 1 FROM _migrations WHERE name = ?",
+            params![migration_name],
+            |_| Ok(true),
+        )
+        .unwrap_or(false);
+
+    if already_applied {
+        return Ok(());
+    }
+
+    info!(migration = %migration_name, "Creating moderation_queue table");
+
+    conn.execute_batch(
+        "
+        CREATE TABLE IF NOT EXISTS moderation_queue (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id BIGINT NOT NULL,
+            chat_id BIGINT NOT NULL,
+            username TEXT NOT NULL DEFAULT '',
+            message_id BIGINT NOT NULL DEFAULT 0,
+            file_tg_id TEXT NOT NULL,
+            file_tg_unique_id TEXT NOT NULL,
+            media_type INTEGER NOT NULL DEFAULT 0,
+            thumbnail_tg_id TEXT NOT NULL DEFAULT '',
+            user_caption TEXT NOT NULL DEFAULT '',
+            source_title TEXT NOT NULL DEFAULT '',
+            source_url TEXT NOT NULL DEFAULT '',
+            reason TEXT NOT NULL DEFAULT '',
+            safety_score REAL NOT NULL DEFAULT 0.0,
+            phash BIGINT NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at BIGINT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_moderation_queue_status
+            ON moderation_queue(status, created_at);
         ",
     )
     .map_err(|e| e.to_string())?;

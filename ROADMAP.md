@@ -633,13 +633,13 @@ Meme ID: 1793041234
     - [x] Dual-mode search delivery: `bot.send_animation` for direct chat & `InlineQueryResultCachedMpeg4Gif` for inline queries.
     - [x] Resilient pHash computation: from `animation.thumbnail` with in-memory `ffmpeg` pipe fallback when Telegram thumbnail is missing.
     - [x] Unified Bang search modifiers: `!gif` and `!img` (or `!pic`) for explicit media filtering in inline queries and chat search.
-- [ ] **v0.3: Moderation & Admin**
+- [x] **v0.3: Moderation & Admin**
   - [x] Parse `safetyRatings` and Safety Filters from Gemini responses.
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
   - [x] Nuanced NSFW policy: strict photographic nudity protection with explicit cultural art/medieval illustration exemptions.
   - [x] Add `gemini-decision-1` pre-ingestion safety & spam gate (`noul` on `10K RPD` quota before calling `Flash Lite`, preventing comic false positives and saving generative quota).
   - [x] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
-  - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
+  - [x] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**
   - [ ] Criterion micro-benchmarks suite for 768-dim vector cosine similarity.
   - [ ] Hand-rolled AVX2 SIMD dot-product kernel (`_mm256_fmadd_ps`).

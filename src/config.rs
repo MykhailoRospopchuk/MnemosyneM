@@ -17,6 +17,26 @@ pub struct AppConfig {
     pub rerank_inline: bool,
     pub rerank_min_score: f32,
     pub rerank_candidates: usize,
+    pub admin_ids: Vec<i64>,
+}
+
+impl AppConfig {
+    pub fn is_admin(&self, user_id: i64) -> bool {
+        self.admin_ids.contains(&user_id)
+    }
+}
+
+fn parse_admin_ids(raw: &str) -> Vec<i64> {
+    let mut ids = Vec::new();
+    for part in raw.split(',') {
+        if let Ok(id) = part.trim().parse::<i64>()
+            && id != 0
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+    }
+    ids
 }
 
 static CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -36,6 +56,11 @@ pub fn load_config() -> &'static AppConfig {
         Ok(_) => info!("GEMINI_API_KEY: [CONFIGURED]"),
         Err(e) => error!(error = %e, "Couldn't read GEMINI_API_KEY"),
     }
+
+    let admin_ids = env::var("ADMIN_TELEGRAM_ID")
+        .map(|raw| parse_admin_ids(&raw))
+        .unwrap_or_default();
+    info!(admin_count = admin_ids.len(), "Admin Telegram IDs loaded");
 
     CONFIG.get_or_init(|| AppConfig {
         db_path: env::var("DB_PATH").expect("Couldn't read DB_PATH"),
@@ -74,5 +99,7 @@ pub fn load_config() -> &'static AppConfig {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(RERANK_CANDIDATES),
+
+        admin_ids,
     })
 }

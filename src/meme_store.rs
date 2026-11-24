@@ -114,6 +114,75 @@ pub enum DeleteMemeOutcome {
     NotFoundOrNotOwner,
 }
 
+#[derive(Debug, Clone)]
+pub struct ModerationQueueItem {
+    pub id: i64,
+    pub user_id: i64,
+    pub chat_id: i64,
+    pub username: String,
+    pub message_id: i64,
+    pub file_tg_id: String,
+    pub file_tg_unique_id: String,
+    pub media_type: MediaType,
+    pub thumbnail_tg_id: String,
+    pub user_caption: String,
+    pub source_title: String,
+    pub source_url: String,
+    pub reason: String,
+    pub safety_score: f32,
+    pub phash: u64,
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminTagInfo {
+    pub id: i64,
+    pub name: String,
+    pub emoji: String,
+    pub is_active: bool,
+    pub meme_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminStatsSummary {
+    pub total_memes: usize,
+    pub public_memes: usize,
+    pub private_memes: usize,
+    pub total_users: usize,
+    pub pending_moderation: usize,
+    pub undetermined_memes: usize,
+    pub blocked_tag_memes: usize,
+    pub active_tags: usize,
+    pub total_tags: usize,
+}
+
+fn purge_meme_rows(tx: &rusqlite::Transaction<'_>, meme_id: u64) -> Result<(), String> {
+    tx.execute("DELETE FROM memes WHERE id = ?", params![meme_id])
+        .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM memes_fts WHERE rowid = ?",
+        params![meme_id as i64],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM meme_tags WHERE meme_id = ?",
+        params![meme_id as i64],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM user_reactions WHERE meme_id = ?",
+        params![meme_id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute(
+        "DELETE FROM user_delivered_memes WHERE meme_id = ?",
+        params![meme_id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 struct FtsHit {
     bm25_score: f32,
     matched_terms: usize,
@@ -192,7 +261,9 @@ impl MemeStore {
             .embed_passage(&passage_en)
             .map_err(|e| e.to_string())?;
 
-        let is_public = self.get_user_settings(new_meme.user_id).upload_as_public;
+        let is_public = new_meme
+            .is_public_override
+            .unwrap_or_else(|| self.get_user_settings(new_meme.user_id).upload_as_public);
 
         let blob_uk = embedding_to_blob(&embed_uk);
         let blob_en = embedding_to_blob(&embed_en);
@@ -540,28 +611,7 @@ impl MemeStore {
             .map_err(|e| e.to_string())?;
 
         if remaining == 0 {
-            tx.execute("DELETE FROM memes WHERE id = ?", params![meme_id])
-                .map_err(|e| e.to_string())?;
-            tx.execute(
-                "DELETE FROM memes_fts WHERE rowid = ?",
-                params![meme_id as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "DELETE FROM meme_tags WHERE meme_id = ?",
-                params![meme_id as i64],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "DELETE FROM user_reactions WHERE meme_id = ?",
-                params![meme_id],
-            )
-            .map_err(|e| e.to_string())?;
-            tx.execute(
-                "DELETE FROM user_delivered_memes WHERE meme_id = ?",
-                params![meme_id],
-            )
-            .map_err(|e| e.to_string())?;
+            purge_meme_rows(&tx, meme_id)?;
 
             tx.commit().map_err(|e| e.to_string())?;
             self.memes.retain(|m| m.id != meme_id);
@@ -702,6 +752,29 @@ impl MemeStore {
                 last_reason TEXT NOT NULL DEFAULT '',
                 updated_at INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS moderation_queue (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id BIGINT NOT NULL,
+                chat_id BIGINT NOT NULL,
+                username TEXT NOT NULL DEFAULT '',
+                message_id BIGINT NOT NULL DEFAULT 0,
+                file_tg_id TEXT NOT NULL,
+                file_tg_unique_id TEXT NOT NULL,
+                media_type INTEGER NOT NULL DEFAULT 0,
+                thumbnail_tg_id TEXT NOT NULL DEFAULT '',
+                user_caption TEXT NOT NULL DEFAULT '',
+                source_title TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                reason TEXT NOT NULL DEFAULT '',
+                safety_score REAL NOT NULL DEFAULT 0.0,
+                phash BIGINT NOT NULL DEFAULT 0,
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at BIGINT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_moderation_queue_status
+                ON moderation_queue(status, created_at);
             ",
         )
         .map_err(|e| e.to_string())?;
@@ -2092,6 +2165,275 @@ impl MemeStore {
             .map_err(|e| e.to_string())?;
         Ok(())
     }
+
+    pub fn enqueue_moderation_item(&self, item: &ModerationQueueItem) -> Result<i64, String> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let created_at = if item.created_at > 0 {
+            item.created_at
+        } else {
+            now
+        };
+
+        self.conn
+            .execute(
+                "INSERT INTO moderation_queue (
+                    user_id, chat_id, username, message_id, file_tg_id, file_tg_unique_id,
+                    media_type, thumbnail_tg_id, user_caption, source_title, source_url,
+                    reason, safety_score, phash, status, created_at
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+                params![
+                    item.user_id,
+                    item.chat_id,
+                    item.username,
+                    item.message_id,
+                    item.file_tg_id,
+                    item.file_tg_unique_id,
+                    item.media_type.as_i32(),
+                    item.thumbnail_tg_id,
+                    item.user_caption,
+                    item.source_title,
+                    item.source_url,
+                    item.reason,
+                    f64::from(item.safety_score),
+                    item.phash as i64,
+                    created_at
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+
+        Ok(self.conn.last_insert_rowid())
+    }
+
+    pub fn get_pending_moderation_items(&self) -> Vec<ModerationQueueItem> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT id, user_id, chat_id, username, message_id, file_tg_id, file_tg_unique_id,
+                    media_type, thumbnail_tg_id, user_caption, source_title, source_url,
+                    reason, safety_score, phash, status, created_at
+             FROM moderation_queue
+             WHERE status = 'pending'
+             ORDER BY created_at ASC, id ASC",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map([], map_moderation_queue_row) else {
+            return Vec::new();
+        };
+        rows.flatten().collect()
+    }
+
+    pub fn get_moderation_item(&self, queue_id: i64) -> Option<ModerationQueueItem> {
+        self.conn
+            .query_row(
+                "SELECT id, user_id, chat_id, username, message_id, file_tg_id, file_tg_unique_id,
+                        media_type, thumbnail_tg_id, user_caption, source_title, source_url,
+                        reason, safety_score, phash, status, created_at
+                 FROM moderation_queue
+                 WHERE id = ?",
+                params![queue_id],
+                map_moderation_queue_row,
+            )
+            .ok()
+    }
+
+    pub fn update_moderation_status(&self, queue_id: i64, status: &str) -> Result<bool, String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE moderation_queue SET status = ? WHERE id = ? AND status = 'pending'",
+                params![status, queue_id],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(updated > 0)
+    }
+
+    pub fn get_admin_stats(&self) -> AdminStatsSummary {
+        let total_memes = self.memes.len();
+        let public_memes = self.memes.iter().filter(|m| m.is_public).count();
+        let private_memes = total_memes.saturating_sub(public_memes);
+
+        let total_users: usize = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM users", [], |row| row.get::<_, i64>(0))
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(self.user_settings.len());
+
+        let pending_moderation: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM moderation_queue WHERE status = 'pending'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        let undetermined_memes: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memes WHERE tags_version = ?",
+                params![TAGS_STATE_UNDETERMINED],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        let blocked_tag_memes: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM memes WHERE tags_version = ?",
+                params![crate::constants::TAGS_STATE_BLOCKED],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        let active_tags: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE is_active = 1 AND name != ?",
+                params![OTHER_TAG_SLUG],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        let total_tags: usize = self
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM tags WHERE name != ?",
+                params![OTHER_TAG_SLUG],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|c| c.max(0) as usize)
+            .unwrap_or(0);
+
+        AdminStatsSummary {
+            total_memes,
+            public_memes,
+            private_memes,
+            total_users,
+            pending_moderation,
+            undetermined_memes,
+            blocked_tag_memes,
+            active_tags,
+            total_tags,
+        }
+    }
+
+    pub fn get_admin_recent_memes(&self, limit: usize) -> Vec<Meme> {
+        self.memes
+            .iter()
+            .rev()
+            .filter(|m| !m.file_tg_id.is_empty())
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn admin_toggle_meme_public(
+        &mut self,
+        meme_id: u64,
+        make_public: bool,
+    ) -> Result<bool, String> {
+        if !self.memes.iter().any(|m| m.id == meme_id) {
+            return Ok(false);
+        }
+
+        self.conn
+            .execute(
+                "UPDATE user_memes SET is_public = ? WHERE meme_id = ?",
+                params![make_public, meme_id],
+            )
+            .map_err(|e| e.to_string())?;
+
+        if let Some(meme) = self.memes.iter_mut().find(|m| m.id == meme_id) {
+            meme.is_public = make_public;
+        }
+        Ok(true)
+    }
+
+    pub fn admin_delete_meme(&mut self, meme_id: u64) -> Result<bool, String> {
+        let tx = self.conn.transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM user_memes WHERE meme_id = ?", params![meme_id])
+            .map_err(|e| e.to_string())?;
+        let deleted = tx
+            .execute("DELETE FROM memes WHERE id = ?", params![meme_id])
+            .map_err(|e| e.to_string())?;
+
+        purge_meme_rows(&tx, meme_id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+
+        let prev_len = self.memes.len();
+        self.memes.retain(|m| m.id != meme_id);
+        Ok(deleted > 0 || self.memes.len() < prev_len)
+    }
+
+    pub fn get_admin_tags(&self) -> Vec<AdminTagInfo> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT t.id, t.name, t.emoji, t.is_active, COUNT(mt.meme_id) AS cnt
+             FROM tags t
+             LEFT JOIN meme_tags mt ON mt.tag_id = t.id
+             WHERE t.name != ?
+             GROUP BY t.id
+             ORDER BY t.is_active DESC, cnt DESC, t.name ASC",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![OTHER_TAG_SLUG], |row| {
+            Ok(AdminTagInfo {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                emoji: row.get(2)?,
+                is_active: row.get(3)?,
+                meme_count: row.get::<_, i64>(4)?.max(0) as usize,
+            })
+        }) else {
+            return Vec::new();
+        };
+
+        rows.flatten().collect()
+    }
+
+    pub fn set_tag_active(&self, tag_id: i64, is_active: bool) -> Result<bool, String> {
+        let updated = self
+            .conn
+            .execute(
+                "UPDATE tags SET is_active = ? WHERE id = ? AND name != ?",
+                params![is_active, tag_id, OTHER_TAG_SLUG],
+            )
+            .map_err(|e| e.to_string())?;
+        Ok(updated > 0)
+    }
+}
+
+fn map_moderation_queue_row(row: &rusqlite::Row) -> rusqlite::Result<ModerationQueueItem> {
+    let media_raw: i32 = row.get(7)?;
+    let phash_raw: i64 = row.get(14)?;
+    Ok(ModerationQueueItem {
+        id: row.get(0)?,
+        user_id: row.get(1)?,
+        chat_id: row.get(2)?,
+        username: row.get(3)?,
+        message_id: row.get(4)?,
+        file_tg_id: row.get(5)?,
+        file_tg_unique_id: row.get(6)?,
+        media_type: MediaType::from_i32(media_raw),
+        thumbnail_tg_id: row.get(8)?,
+        user_caption: row.get(9)?,
+        source_title: row.get(10)?,
+        source_url: row.get(11)?,
+        reason: row.get(12)?,
+        safety_score: row.get::<_, f64>(13)? as f32,
+        phash: phash_raw as u64,
+        status: row.get(15)?,
+        created_at: row.get(16)?,
+    })
 }
 
 fn map_drip_subscription_row(row: &rusqlite::Row) -> rusqlite::Result<DripSubscription> {
@@ -2425,6 +2767,7 @@ mod tests {
             rerank_inline: false,
             rerank_min_score: 0.15,
             rerank_candidates: 10,
+            admin_ids: Vec::new(),
         }
     }
 
@@ -3344,5 +3687,70 @@ mod tests {
         assert_eq!(owned[1].meme.id, 10);
         assert!(!owned[1].user_is_public);
         assert!(owned[1].meme.is_public);
+    }
+
+    #[test]
+    fn moderation_queue_lifecycle_and_admin_purge_and_tag_toggle() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+
+        let item = ModerationQueueItem {
+            id: 0,
+            user_id: 55,
+            chat_id: 55,
+            username: "tester".to_string(),
+            message_id: 101,
+            file_tg_id: "tg_mod_1".to_string(),
+            file_tg_unique_id: "u_mod_1".to_string(),
+            media_type: MediaType::Photo,
+            thumbnail_tg_id: String::new(),
+            user_caption: "borderline".to_string(),
+            source_title: String::new(),
+            source_url: String::new(),
+            reason: "Explicit nudity check".to_string(),
+            safety_score: 0.14,
+            phash: 777,
+            status: "pending".to_string(),
+            created_at: 1000,
+        };
+
+        let qid = store.enqueue_moderation_item(&item).unwrap();
+        assert!(qid > 0);
+        assert_eq!(store.get_pending_moderation_items().len(), 1);
+        assert_eq!(store.get_admin_stats().pending_moderation, 1);
+
+        // First status transition wins; concurrent second tap returns false
+        assert!(store.update_moderation_status(qid, "rejected").unwrap());
+        assert!(!store.update_moderation_status(qid, "approved_public").unwrap());
+        assert!(store.get_pending_moderation_items().is_empty());
+        assert_eq!(store.get_moderation_item(qid).unwrap().status, "rejected");
+
+        // Admin recent / visibility toggle / force delete across owners
+        seed_memory_meme(&mut store, 88, "a", "a", "a", "", vec![1.0, 0.0]);
+        store.memes[0].is_public = true;
+        store.memes[0].owners = vec![1, 2];
+        store
+            .conn
+            .execute(
+                "INSERT INTO user_memes (user_id, meme_id, user_captions, is_public, created_at) VALUES (1, 88, '', 1, 100), (2, 88, '', 1, 101)",
+                [],
+            )
+            .unwrap();
+        store
+            .set_meme_tags(88, &[("коти".to_string(), 0.9)], 1)
+            .unwrap();
+
+        assert!(store.admin_toggle_meme_public(88, false).unwrap());
+        assert!(!store.memes[0].is_public);
+        assert!(store.admin_delete_meme(88).unwrap());
+        assert!(store.memes.is_empty());
+
+        // Admin tag toggle disables and re-enables category (excluding #інше)
+        let tags_before = store.get_admin_tags();
+        let first_id = tags_before[0].id;
+        assert!(store.set_tag_active(first_id, false).unwrap());
+        let active_after_off = store.get_active_taxonomy();
+        assert_eq!(active_after_off.len(), TAG_TAXONOMY.len() - 1);
+        assert!(store.set_tag_active(first_id, true).unwrap());
+        assert_eq!(store.get_active_taxonomy().len(), TAG_TAXONOMY.len());
     }
 }

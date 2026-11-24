@@ -605,6 +605,17 @@ impl VlmRouter {
         api_key: &str,
         mime_type: &str,
     ) -> Result<MemeAnalysis, VlmError> {
+        self.describe_meme_with_policy(image_bytes, api_key, mime_type, false)
+            .await
+    }
+
+    pub async fn describe_meme_with_policy(
+        &self,
+        image_bytes: &[u8],
+        api_key: &str,
+        mime_type: &str,
+        allow_nsfw_flag: bool,
+    ) -> Result<MemeAnalysis, VlmError> {
         let base64_image = STANDARD.encode(image_bytes);
         let size_kb = image_bytes.len() / 1024;
 
@@ -841,7 +852,7 @@ impl VlmRouter {
                 .ok_or_else(|| VlmError::Transient("Missing text in Gemini response".to_string()))?;
 
             let analysis = parse_meme_analysis(raw_text)?;
-            if analysis.is_nsfw {
+            if analysis.is_nsfw && !allow_nsfw_flag {
                 warn!(
                     model = spec.id,
                     "Explicit/NSFW content detected in VLM analysis"

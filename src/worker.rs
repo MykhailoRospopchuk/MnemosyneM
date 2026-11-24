@@ -57,6 +57,92 @@ async fn reply_to_job_with_markup(
         .await;
 }
 
+async fn handle_flagged_media(
+    bot: &Bot,
+    state: &AppState,
+    app_config: &AppConfig,
+    job: MemeJob,
+    phash: u64,
+    reason: String,
+    safety_score: f32,
+) {
+    if app_config.admin_ids.is_empty() {
+        reply_to_job(
+            bot,
+            job.chat_id,
+            job.message_id,
+            format!(
+                "⛔ [REJECTED] {}\nNSFW or graphic content is strictly prohibited!",
+                reason
+            ),
+        )
+        .await;
+        return;
+    }
+
+    let user_caption = if job.captions == "no content from lazy user" {
+        String::new()
+    } else {
+        job.captions
+    };
+
+    let mut item = crate::meme_store::ModerationQueueItem {
+        id: 0,
+        user_id: job.user_id,
+        chat_id: job.chat_id.0,
+        username: job.username.unwrap_or_default(),
+        message_id: i64::from(job.message_id.0),
+        file_tg_id: job.file_id,
+        file_tg_unique_id: job.file_unique_id,
+        media_type: job.media_type,
+        thumbnail_tg_id: job.thumbnail_file_id.unwrap_or_default(),
+        user_caption,
+        source_title: job.source_title,
+        source_url: job.source_url,
+        reason: reason.clone(),
+        safety_score,
+        phash,
+        status: "pending".to_string(),
+        created_at: 0,
+    };
+
+    let queued_id = {
+        let store = state.meme_store.lock().await;
+        store.enqueue_moderation_item(&item)
+    };
+
+    match queued_id {
+        Ok(id) => {
+            item.id = id;
+            reply_to_job(
+                bot,
+                job.chat_id,
+                job.message_id,
+                "🛡️ Мем відправлено на перевірку модератору.",
+            )
+            .await;
+            crate::bot::admin::notify_admins_of_moderation(bot, app_config, &item).await;
+        }
+        Err(e) => {
+            error!(
+                user_id = job.user_id,
+                error = %e,
+                "Failed to enqueue flagged meme for moderation"
+            );
+            reply_to_job(
+                bot,
+                job.chat_id,
+                job.message_id,
+                format!(
+                    "⛔ [REJECTED] {}\nNSFW content is strictly prohibited!",
+                    reason
+                ),
+            )
+            .await;
+        }
+    }
+}
+
 pub fn start_worker(
     mut receiver: Receiver<MemeJob>,
     sender: Sender<MemeJob>,
@@ -253,16 +339,16 @@ pub fn start_worker(
                     file_unique_id = %file_unique_id,
                     safety_score,
                     reason = %reason,
-                    "Inappropriate meme rejected by pre-ingestion safety gate"
+                    "Inappropriate meme flagged by pre-ingestion safety gate"
                 );
-                reply_to_job(
+                handle_flagged_media(
                     &bot,
-                    job.chat_id,
-                    job.message_id,
-                    format!(
-                        "⛔ [REJECTED] {}\nNSFW or graphic content is strictly prohibited!",
-                        reason
-                    ),
+                    &state,
+                    app_config,
+                    job,
+                    phash,
+                    reason,
+                    safety_score,
                 )
                 .await;
                 tokio::time::sleep(Duration::from_millis(300)).await;
@@ -283,18 +369,9 @@ pub fn start_worker(
                         username,
                         file_unique_id = %file_unique_id,
                         reason = %reason,
-                        "Inappropriate meme rejected by safety filter"
+                        "Inappropriate meme flagged by safety filter"
                     );
-                    reply_to_job(
-                        &bot,
-                        job.chat_id,
-                        job.message_id,
-                        format!(
-                            "⛔ [REJECTED] Inappropriate content detected: {}\nNSFW content is strictly prohibited!",
-                            reason
-                        ),
-                    )
-                    .await;
+                    handle_flagged_media(&bot, &state, app_config, job, phash, reason, 0.0).await;
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
@@ -389,6 +466,7 @@ pub fn start_worker(
                         media_type: job.media_type,
                         thumbnail_tg_id: job.thumbnail_file_id.unwrap_or_default(),
                         vlm_version: constants::CURRENT_VLM_VERSION,
+                        is_public_override: None,
                     },
                     &mut engine,
                 )

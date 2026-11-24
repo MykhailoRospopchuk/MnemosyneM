@@ -13,4 +13,5 @@ pub struct NewMeme<'a> {
     pub media_type: MediaType,
     pub thumbnail_tg_id: String,
     pub vlm_version: i64,
+    pub is_public_override: Option<bool>,
 }
