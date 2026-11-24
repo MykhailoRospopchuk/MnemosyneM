@@ -13,10 +13,12 @@ use teloxide::prelude::*;
 use teloxide::types::{
     Animation, FileId, InlineQueryResult, InlineQueryResultCachedMpeg4Gif,
     InlineQueryResultCachedPhoto, InputFile, InputMedia, InputMediaPhoto, Message, MessageOrigin,
-    PhotoSize, ReplyParameters,
+    ParseMode, PhotoSize, ReplyParameters,
 };
 use tokio::sync::mpsc::Sender;
 use tracing::{error, info, warn};
+
+const INLINE_PAGE_SIZE: usize = 25;
 
 struct MediaPayload {
     file_id: String,
@@ -247,13 +249,11 @@ async fn run_search(
     let t_stage1 = Instant::now();
     let candidates = {
         let meme_store = state.meme_store.lock().await;
-        let settings = meme_store.get_user_settings(user_id);
         meme_store.stage1_candidates_from_embedding(
             &query_vec,
             clean_query,
             app_config,
             user_id,
-            &settings.search_scope,
             filter,
             candidate_limit,
         )
@@ -321,23 +321,24 @@ async fn send_search_results(
     bot: &Bot,
     msg: &Message,
     valid_memes: Vec<(Meme, f32)>,
+    show_score: bool,
     user_id: i64,
     username: &str,
 ) -> ResponseResult<()> {
     let mut photo_items: Vec<(String, String)> = Vec::new();
 
     for (media, score) in valid_memes {
-        let caption = build_caption(&media.source_title, &media.source_url, &score);
+        let caption = build_caption(&media, show_score.then_some(score));
         match media.media_type {
             MediaType::Animation => {
-                if let Err(e) = bot
-                    .send_animation(
-                        msg.chat.id,
-                        InputFile::file_id(FileId(media.file_tg_id.clone())),
-                    )
-                    .caption(caption)
-                    .await
-                {
+                let mut req = bot.send_animation(
+                    msg.chat.id,
+                    InputFile::file_id(FileId(media.file_tg_id.clone())),
+                );
+                if !caption.is_empty() {
+                    req = req.caption(caption).parse_mode(ParseMode::Html);
+                }
+                if let Err(e) = req.await {
                     error!(
                         user_id,
                         username,
@@ -358,11 +359,11 @@ async fn send_search_results(
         0 => {}
         1 => {
             let (file_id, caption) = photo_items.remove(0);
-            if let Err(e) = bot
-                .send_photo(msg.chat.id, InputFile::file_id(FileId(file_id)))
-                .caption(caption)
-                .await
-            {
+            let mut req = bot.send_photo(msg.chat.id, InputFile::file_id(FileId(file_id)));
+            if !caption.is_empty() {
+                req = req.caption(caption).parse_mode(ParseMode::Html);
+            }
+            if let Err(e) = req.await {
                 error!(user_id, username, error = ?e, "Telegram send_photo failed");
                 bot.send_message(msg.chat.id, format!("Send photo error: {}", e))
                     .await?;
@@ -372,9 +373,11 @@ async fn send_search_results(
             let result_media_group: Vec<InputMedia> = photo_items
                 .into_iter()
                 .map(|(file_id, caption)| {
-                    InputMedia::Photo(
-                        InputMediaPhoto::new(InputFile::file_id(FileId(file_id))).caption(caption),
-                    )
+                    let mut photo = InputMediaPhoto::new(InputFile::file_id(FileId(file_id)));
+                    if !caption.is_empty() {
+                        photo = photo.caption(caption).parse_mode(ParseMode::Html);
+                    }
+                    InputMedia::Photo(photo)
                 })
                 .collect();
             if let Err(e) = bot.send_media_group(msg.chat.id, result_media_group).await {
@@ -446,7 +449,7 @@ pub async fn handle_search(
                 )
                 .await?;
             } else {
-                send_search_results(bot, msg, tagged_memes, user_id, username).await?;
+                send_search_results(bot, msg, tagged_memes, false, user_id, username).await?;
             }
             return Ok(());
         }
@@ -513,7 +516,7 @@ pub async fn handle_search(
                 bot.send_message(msg.chat.id, "There is nothing useful here...")
                     .await?;
             } else {
-                send_search_results(bot, msg, valid_memes, user_id, username).await?;
+                send_search_results(bot, msg, valid_memes, true, user_id, username).await?;
             }
         }
         Err(e) => {
@@ -540,55 +543,82 @@ pub async fn handle_inline_query(
 ) -> ResponseResult<()> {
     let user_id = query.from.id.0 as i64;
     let username = query.from.username.as_deref().unwrap_or("-");
+    let offset: usize = query.offset.trim().parse().unwrap_or(0);
     let parsed = parse_search_query(&query.query);
 
-    let make_inline_result = |idx: usize, meme: &Meme, score: f32| -> InlineQueryResult {
-        let caption = build_caption(&meme.source_title, &meme.source_url, &score);
+    let make_inline_result =
+        |abs_idx: usize, meme: &Meme, score: Option<f32>| -> InlineQueryResult {
+            let caption = build_caption(meme, score);
+            let result_id = format!("{}_{}", meme.id, abs_idx);
 
-        match meme.media_type {
-            MediaType::Animation => InlineQueryResult::CachedMpeg4Gif(
-                InlineQueryResultCachedMpeg4Gif::new(
-                    format!("{}_{}", meme.id, idx),
-                    FileId(meme.file_tg_id.clone()),
-                )
-                .caption(caption),
-            ),
-            MediaType::Photo => InlineQueryResult::CachedPhoto(
-                InlineQueryResultCachedPhoto::new(
-                    format!("{}_{}", meme.id, idx),
-                    FileId(meme.file_tg_id.clone()),
-                )
-                .caption(caption),
-            ),
-        }
-    };
-
-    if parsed.clean_query.is_empty() {
-        let meme_store = state.meme_store.lock().await;
-        let recent_memes = if !parsed.tag_filters.is_empty() {
-            meme_store.get_memes_by_tags(user_id, &parsed.tag_filters, 25, parsed.media_filter)
-        } else {
-            meme_store.get_recent_memes(user_id, app_config.top_k, parsed.media_filter)
+            match meme.media_type {
+                MediaType::Animation => {
+                    let mut item = InlineQueryResultCachedMpeg4Gif::new(
+                        result_id,
+                        FileId(meme.file_tg_id.clone()),
+                    );
+                    if !caption.is_empty() {
+                        item = item.caption(caption).parse_mode(ParseMode::Html);
+                    }
+                    InlineQueryResult::CachedMpeg4Gif(item)
+                }
+                MediaType::Photo => {
+                    let mut item =
+                        InlineQueryResultCachedPhoto::new(result_id, FileId(meme.file_tg_id.clone()));
+                    if !caption.is_empty() {
+                        item = item.caption(caption).parse_mode(ParseMode::Html);
+                    }
+                    InlineQueryResult::CachedPhoto(item)
+                }
+            }
         };
 
-        let result: Vec<InlineQueryResult> = recent_memes
-            .into_iter()
-            .enumerate()
-            .filter(|(_, meme)| !meme.file_tg_id.is_empty())
-            .map(|(idx, meme)| make_inline_result(idx, meme, 1.0))
-            .collect();
-        drop(meme_store);
+    if parsed.clean_query.is_empty() {
+        let (result, has_more) = {
+            let meme_store = state.meme_store.lock().await;
+            let (memes, has_more) = if !parsed.tag_filters.is_empty() {
+                meme_store.get_memes_by_tags_page(
+                    user_id,
+                    &parsed.tag_filters,
+                    offset,
+                    INLINE_PAGE_SIZE,
+                    parsed.media_filter,
+                )
+            } else {
+                meme_store.get_recent_memes_page(
+                    user_id,
+                    offset,
+                    INLINE_PAGE_SIZE,
+                    parsed.media_filter,
+                )
+            };
+
+            let items: Vec<InlineQueryResult> = memes
+                .into_iter()
+                .enumerate()
+                .map(|(i, meme)| make_inline_result(offset + i, meme, None))
+                .collect();
+            (items, has_more)
+        };
+
+        let next_offset = if has_more && !result.is_empty() {
+            (offset + result.len()).to_string()
+        } else {
+            String::new()
+        };
 
         if let Err(e) = bot
             .answer_inline_query(query.id, result)
             .is_personal(true)
             .cache_time(5)
+            .next_offset(next_offset)
             .await
         {
             error!(
                 user_id,
                 username,
                 tag_filters = ?parsed.tag_filters,
+                offset,
                 error = %e,
                 "Inline search for empty/tag query failed"
             );
@@ -613,17 +643,19 @@ pub async fn handle_inline_query(
         return Ok(());
     }
 
-    {
-        let mut last_queries = state.last_inline_query.lock().await;
-        last_queries.insert(user_id, query.id.0.clone());
-    }
+    if offset == 0 {
+        {
+            let mut last_queries = state.last_inline_query.lock().await;
+            last_queries.insert(user_id, query.id.0.clone());
+        }
 
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
-    {
-        let last_queries = state.last_inline_query.lock().await;
-        if last_queries.get(&user_id) != Some(&query.id.0) {
-            return Ok(());
+        {
+            let last_queries = state.last_inline_query.lock().await;
+            if last_queries.get(&user_id) != Some(&query.id.0) {
+                return Ok(());
+            }
         }
     }
 
@@ -632,7 +664,7 @@ pub async fn handle_inline_query(
         media: parsed.media_filter,
         tags: &parsed.tag_filters,
     };
-    let results = match run_search(
+    let (results, next_offset) = match run_search(
         &state,
         app_config,
         &parsed.clean_query,
@@ -644,23 +676,39 @@ pub async fn handle_inline_query(
     .await
     {
         Ok(matches) => {
-            let items: Vec<InlineQueryResult> = matches
+            let mut valid: Vec<(usize, InlineQueryResult)> = matches
                 .into_iter()
+                .filter(|(meme, _)| !meme.file_tg_id.is_empty())
+                .skip(offset)
+                .take(INLINE_PAGE_SIZE + 1)
                 .enumerate()
-                .filter(|(_, (meme, _))| !meme.file_tg_id.is_empty())
-                .map(|(idx, (meme, score))| make_inline_result(idx, &meme, score))
+                .map(|(i, (meme, score))| {
+                    let abs_idx = offset + i;
+                    (abs_idx, make_inline_result(abs_idx, &meme, Some(score)))
+                })
                 .collect();
+
+            let has_more = valid.len() > INLINE_PAGE_SIZE;
+            valid.truncate(INLINE_PAGE_SIZE);
+            let items: Vec<InlineQueryResult> = valid.into_iter().map(|(_, item)| item).collect();
+            let next_off = if has_more && !items.is_empty() {
+                (offset + items.len()).to_string()
+            } else {
+                String::new()
+            };
+
             info!(
                 user_id,
                 username,
                 query = %parsed.clean_query,
                 media_filter = ?parsed.media_filter,
                 tag_filters = ?parsed.tag_filters,
+                offset,
                 results = items.len(),
                 latency_ms = t0.elapsed().as_millis(),
                 "Inline search completed"
             );
-            items
+            (items, next_off)
         }
         Err(e) => {
             error!(
@@ -671,7 +719,7 @@ pub async fn handle_inline_query(
                 error = %e,
                 "Inline search failed"
             );
-            vec![]
+            (vec![], String::new())
         }
     };
 
@@ -679,6 +727,7 @@ pub async fn handle_inline_query(
         .answer_inline_query(query.id, results)
         .is_personal(true)
         .cache_time(30)
+        .next_offset(next_offset)
         .await
     {
         warn!(
@@ -692,15 +741,55 @@ pub async fn handle_inline_query(
     Ok(())
 }
 
-pub fn build_caption(source_title: &str, source_url: &str, score: &f32) -> String {
-    if !source_url.is_empty() {
-        format!(
-            "📊 Match: {:.1}%\n => Source: [{}] => ({})",
-            score * 100.0,
-            source_title,
-            source_url
-        )
-    } else {
-        format!("📊 Match: {:.1}%", score * 100.0)
+pub fn build_caption(meme: &Meme, score: Option<f32>) -> String {
+    let source_html = crate::bot::tinder::format_source_html(meme);
+    match score {
+        Some(s) => format!("📊 {:.0}%{}", (s * 100.0).clamp(0.0, 100.0), source_html),
+        None => source_html
+            .strip_prefix(" · ")
+            .unwrap_or(&source_html)
+            .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_meme(source_title: &str, source_url: &str) -> Meme {
+        Meme {
+            id: 1,
+            title: String::new(),
+            ocr_text: String::new(),
+            embedding_uk: Vec::new(),
+            embedding_en: Vec::new(),
+            file_tg_id: "tg1".to_string(),
+            file_tg_unique_id: "u1".to_string(),
+            source_title: source_title.to_string(),
+            source_url: source_url.to_string(),
+            is_public: true,
+            owners: Vec::new(),
+            phash: 0,
+            media_type: MediaType::Photo,
+            thumbnail_tg_id: String::new(),
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn build_caption_renders_compact_html_for_search_and_tag_browse() {
+        let with_source = sample_meme("WTF & IT", "https://t.me/WTF_UKR/42");
+        assert_eq!(
+            build_caption(&with_source, Some(0.923)),
+            "📊 92% · 📎 <a href=\"https://t.me/WTF_UKR/42\">WTF &amp; IT</a>"
+        );
+        assert_eq!(
+            build_caption(&with_source, None),
+            "📎 <a href=\"https://t.me/WTF_UKR/42\">WTF &amp; IT</a>"
+        );
+
+        let no_source = sample_meme("", "");
+        assert_eq!(build_caption(&no_source, Some(0.87)), "📊 87%");
+        assert_eq!(build_caption(&no_source, None), "");
     }
 }

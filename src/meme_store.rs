@@ -100,6 +100,13 @@ pub struct MemeCardInfo {
     pub tags: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct OwnedMemeEntry {
+    pub meme: Meme,
+    pub user_is_public: bool,
+    pub tags: Vec<(String, String)>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeleteMemeOutcome {
     DeletedCompletely,
@@ -383,6 +390,41 @@ impl MemeStore {
         Some(candidates[idx])
     }
 
+    fn load_tag_emoji_map(&self) -> HashMap<String, String> {
+        let mut emoji_map: HashMap<String, String> = HashMap::new();
+        if let Ok(mut stmt) = self.conn.prepare("SELECT name, emoji FROM tags")
+            && let Ok(rows) = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+        {
+            for (name, emoji) in rows.flatten() {
+                emoji_map.insert(name, emoji);
+            }
+        }
+        emoji_map
+    }
+
+    fn resolve_tag_emojis_with_map(
+        emoji_map: &HashMap<String, String>,
+        tag_names: &[String],
+    ) -> Vec<(String, String)> {
+        tag_names
+            .iter()
+            .map(|slug| {
+                let emoji = emoji_map
+                    .get(slug)
+                    .cloned()
+                    .unwrap_or_else(|| tag_emoji(slug).to_string());
+                (slug.clone(), emoji)
+            })
+            .collect()
+    }
+
+    fn resolve_tag_emojis(&self, tag_names: &[String]) -> Vec<(String, String)> {
+        let emoji_map = self.load_tag_emoji_map();
+        Self::resolve_tag_emojis_with_map(&emoji_map, tag_names)
+    }
+
     pub fn get_meme_card_info(&self, user_id: i64, meme_id: u64) -> Option<MemeCardInfo> {
         let user_is_public: bool = self
             .conn
@@ -394,35 +436,48 @@ impl MemeStore {
             .ok()?;
 
         let meme = self.memes.iter().find(|m| m.id == meme_id)?;
-
-        let mut emoji_map: HashMap<String, String> = HashMap::new();
-        if let Ok(mut stmt) = self.conn.prepare("SELECT name, emoji FROM tags")
-            && let Ok(rows) = stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-        {
-            for (name, emoji) in rows.flatten() {
-                emoji_map.insert(name, emoji);
-            }
-        }
-
-        let tags = meme
-            .tags
-            .iter()
-            .map(|slug| {
-                let emoji = emoji_map
-                    .get(slug)
-                    .cloned()
-                    .unwrap_or_else(|| tag_emoji(slug).to_string());
-                (slug.clone(), emoji)
-            })
-            .collect();
+        let tags = self.resolve_tag_emojis(&meme.tags);
 
         Some(MemeCardInfo {
             user_is_public,
             effective_is_public: meme.is_public,
             tags,
         })
+    }
+
+    pub fn get_user_owned_memes(&self, user_id: i64) -> Vec<OwnedMemeEntry> {
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT meme_id, is_public
+             FROM user_memes
+             WHERE user_id = ?
+             ORDER BY created_at DESC, meme_id DESC",
+        ) else {
+            return Vec::new();
+        };
+
+        let Ok(rows) = stmt.query_map(params![user_id], |row| {
+            Ok((row.get::<_, u64>(0)?, row.get::<_, bool>(1)?))
+        }) else {
+            return Vec::new();
+        };
+
+        let meme_by_id: HashMap<u64, &Meme> = self.memes.iter().map(|m| (m.id, m)).collect();
+        let emoji_map = self.load_tag_emoji_map();
+
+        rows.flatten()
+            .filter_map(|(meme_id, user_is_public)| {
+                let meme = meme_by_id.get(&meme_id).copied()?;
+                if meme.file_tg_id.is_empty() {
+                    return None;
+                }
+                let tags = Self::resolve_tag_emojis_with_map(&emoji_map, &meme.tags);
+                Some(OwnedMemeEntry {
+                    meme: meme.clone(),
+                    user_is_public,
+                    tags,
+                })
+            })
+            .collect()
     }
 
     pub fn set_user_meme_visibility(
@@ -929,32 +984,34 @@ impl MemeStore {
         Ok(())
     }
 
-    pub fn get_recent_memes(
+    pub fn get_recent_memes_page(
         &self,
         user_id: i64,
+        offset: usize,
         limit: usize,
         media_filter: Option<MediaType>,
-    ) -> Vec<&Meme> {
+    ) -> (Vec<&Meme>, bool) {
+        if limit == 0 {
+            return (Vec::new(), false);
+        }
         let settings = self.get_user_settings(user_id);
 
-        match media_filter {
-            Some(filter) => self
-                .memes
-                .iter()
-                .rev()
-                .filter(|m| {
-                    m.is_visible_to(user_id, &settings.search_scope) && m.media_type == filter
-                })
-                .take(limit)
-                .collect(),
-            None => self
-                .memes
-                .iter()
-                .rev()
-                .filter(|m| m.is_visible_to(user_id, &settings.search_scope))
-                .take(limit)
-                .collect(),
-        }
+        let mut items: Vec<&Meme> = self
+            .memes
+            .iter()
+            .rev()
+            .filter(|m| {
+                !m.file_tg_id.is_empty()
+                    && m.is_visible_to(user_id, &settings.search_scope)
+                    && media_filter.is_none_or(|f| m.media_type == f)
+            })
+            .skip(offset)
+            .take(limit + 1)
+            .collect();
+
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        (items, has_more)
     }
 
     pub fn stage1_candidates_from_embedding(
@@ -963,7 +1020,6 @@ impl MemeStore {
         query_text: &str,
         app_config: &AppConfig,
         user_id: i64,
-        scope_visibility: &str,
         filter: SearchFilter<'_>,
         candidate_limit: usize,
     ) -> Vec<Stage1Candidate> {
@@ -971,13 +1027,14 @@ impl MemeStore {
             return Vec::new();
         }
 
+        let scope_visibility = self.get_user_settings(user_id).search_scope;
         let fts_hits = self.query_fts_hits(query_text, BM25_MATCH_LIMIT);
         let scored = score_candidates(
             query,
             query_text,
             &self.memes,
             user_id,
-            scope_visibility,
+            &scope_visibility,
             filter,
             &fts_hits,
         );
@@ -1312,7 +1369,7 @@ impl MemeStore {
                         uk_norm: row.get(3)?,
                         en_norm: row.get(4)?,
                         title_norm: row.get(5)?,
-                        bm25_score: (-raw_bm25 as f32).max(0.0),
+                        bm25_score: (-raw_bm25).max(0.0),
                     })
                 }) {
                     Ok(r) => r,
@@ -1351,10 +1408,10 @@ impl MemeStore {
                 }
                 drop(stmt);
 
-                return result;
+                result
             }
-            None => return HashMap::new(),
-        };
+            None => HashMap::new(),
+        }
     }
 
     pub fn record_reaction(
@@ -1848,16 +1905,21 @@ impl MemeStore {
         list
     }
 
-    pub fn get_memes_by_tags(
+    pub fn get_memes_by_tags_page(
         &self,
         user_id: i64,
         tags: &[String],
+        offset: usize,
         limit: usize,
         media_filter: Option<MediaType>,
-    ) -> Vec<&Meme> {
+    ) -> (Vec<&Meme>, bool) {
+        if limit == 0 {
+            return (Vec::new(), false);
+        }
         let settings = self.get_user_settings(user_id);
 
-        self.memes
+        let mut items: Vec<&Meme> = self
+            .memes
             .iter()
             .rev()
             .filter(|m| {
@@ -1866,8 +1928,24 @@ impl MemeStore {
                     && tags.iter().all(|tag| m.has_tag(tag))
                     && media_filter.is_none_or(|f| m.media_type == f)
             })
-            .take(limit)
-            .collect()
+            .skip(offset)
+            .take(limit + 1)
+            .collect();
+
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+        (items, has_more)
+    }
+
+    pub fn get_memes_by_tags(
+        &self,
+        user_id: i64,
+        tags: &[String],
+        limit: usize,
+        media_filter: Option<MediaType>,
+    ) -> Vec<&Meme> {
+        self.get_memes_by_tags_page(user_id, tags, 0, limit, media_filter)
+            .0
     }
 
     pub fn get_active_taxonomy(&self) -> Vec<DynamicTagDef> {
@@ -2613,7 +2691,6 @@ mod tests {
             "важко вранці",
             &cfg,
             1,
-            "all",
             SearchFilter::default(),
             15,
         );
@@ -3198,5 +3275,74 @@ mod tests {
             "Negative rejection dropped to {}",
             neg_rejection_rate
         );
+    }
+
+    #[test]
+    fn inline_pagination_slices_recent_and_tagged_memes_with_has_more() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        for id in 1..=5u64 {
+            seed_memory_meme(&mut store, id, "ocr", "опис", "desc", "", vec![1.0, 0.0]);
+            store
+                .set_meme_tags(id, &[("коти".to_string(), 0.9)], 1)
+                .unwrap();
+        }
+        // Memes ordered newest first: 5, 4, 3, 2, 1
+        let (p1, more1) = store.get_recent_memes_page(1, 0, 2, None);
+        assert!(more1);
+        assert_eq!(p1.iter().map(|m| m.id).collect::<Vec<_>>(), vec![5, 4]);
+
+        let (p2, more2) = store.get_recent_memes_page(1, 2, 2, None);
+        assert!(more2);
+        assert_eq!(p2.iter().map(|m| m.id).collect::<Vec<_>>(), vec![3, 2]);
+
+        let (p3, more3) = store.get_recent_memes_page(1, 4, 2, None);
+        assert!(!more3);
+        assert_eq!(p3.iter().map(|m| m.id).collect::<Vec<_>>(), vec![1]);
+
+        let tags = vec!["коти".to_string()];
+        let (tp1, tmore1) = store.get_memes_by_tags_page(1, &tags, 0, 3, None);
+        assert!(tmore1);
+        assert_eq!(tp1.iter().map(|m| m.id).collect::<Vec<_>>(), vec![5, 4, 3]);
+
+        let (tp2, tmore2) = store.get_memes_by_tags_page(1, &tags, 3, 3, None);
+        assert!(!tmore2);
+        assert_eq!(tp2.iter().map(|m| m.id).collect::<Vec<_>>(), vec![2, 1]);
+    }
+
+    #[test]
+    fn get_user_owned_memes_returns_newest_first_with_personal_visibility() {
+        let mut store = MemeStore::open(":memory:").unwrap();
+        seed_memory_meme(&mut store, 10, "a", "a", "a", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 20, "b", "b", "b", "", vec![1.0, 0.0]);
+        seed_memory_meme(&mut store, 30, "c", "c", "c", "", vec![1.0, 0.0]);
+
+        store.memes[0].is_public = true;
+        store.memes[0].owners = vec![7, 9];
+        store.memes[1].is_public = false;
+        store.memes[1].owners = vec![7];
+        store.memes[2].is_public = true;
+        store.memes[2].owners = vec![9];
+
+        store
+            .set_meme_tags(20, &[("робота".to_string(), 0.9)], 1)
+            .unwrap();
+
+        store
+            .conn
+            .execute(
+                "INSERT INTO user_memes (user_id, meme_id, user_captions, is_public, created_at)
+                 VALUES (7, 10, '', 0, 100), (9, 10, '', 1, 101), (7, 20, '', 0, 200), (9, 30, '', 1, 300)",
+                [],
+            )
+            .unwrap();
+
+        let owned = store.get_user_owned_memes(7);
+        assert_eq!(owned.len(), 2);
+        assert_eq!(owned[0].meme.id, 20);
+        assert!(!owned[0].user_is_public);
+        assert_eq!(owned[0].tags, vec![("робота".to_string(), "💼".to_string())]);
+        assert_eq!(owned[1].meme.id, 10);
+        assert!(!owned[1].user_is_public);
+        assert!(owned[1].meme.is_public);
     }
 }

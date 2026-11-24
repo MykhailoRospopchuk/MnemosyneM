@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use reqwest::StatusCode;
 use serde_json::{Map, Value, json};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const DECISIONS_API_URL: &str = "https://generativelanguage.googleapis.com/v1beta/decisions";
 const DECISIONS_MODEL: &str = "gemini-decision-1";
@@ -55,6 +55,7 @@ pub struct DiscoverySample {
 #[derive(Debug)]
 pub enum TagError {
     RateLimited(String),
+    ContentBlocked(String),
     Transient(String),
 }
 
@@ -407,28 +408,26 @@ fn build_tagger_input(
     parts.join("\n")
 }
 
-pub async fn classify_meme_tags(
-    api_key: &str,
-    ocr_text: &str,
-    description_uk: &str,
-    description_en: &str,
-    title: &str,
-    taxonomy: &[DynamicTagDef],
-) -> Result<TagClassification, TagError> {
-    let input = build_tagger_input(ocr_text, description_uk, description_en, title);
-    if input.is_empty() {
-        return Ok(TagClassification {
-            tags: Vec::new(),
-            is_undetermined: false,
-        });
+fn is_input_blocked_error(status: StatusCode, err_msg: &str) -> bool {
+    if status != StatusCode::BAD_REQUEST {
+        return false;
     }
+    let lower = err_msg.to_lowercase();
+    lower.contains("input blocked")
+        || lower.contains("prohibited use policy")
+        || lower.contains("sensitive words")
+}
 
-    let (questions, id_to_slug) = build_decision_questions(taxonomy);
-
+async fn request_decision_tags(
+    api_key: &str,
+    input: &str,
+    questions: &Map<String, Value>,
+    id_to_slug: &HashMap<String, String>,
+) -> Result<TagClassification, TagError> {
     let body = json!({
         "model": DECISIONS_MODEL,
         "input": input,
-        "questions": Value::Object(questions),
+        "questions": Value::Object(questions.clone()),
     });
 
     let res = shared_http_client()
@@ -456,20 +455,70 @@ pub async fn classify_meme_tags(
             .as_str()
             .unwrap_or("Unknown Decision API error");
         warn!(status = %status, error = err_msg, "Decision API returned error");
-        return Err(TagError::Transient(format!(
-            "Decision API {}: {}",
-            status, err_msg
-        )));
+        let full_err = format!("Decision API {}: {}", status, err_msg);
+        if is_input_blocked_error(status, err_msg) {
+            return Err(TagError::ContentBlocked(full_err));
+        }
+        return Err(TagError::Transient(full_err));
     }
 
     let selected =
-        select_tags_from_response(&payload, &id_to_slug).map_err(TagError::Transient)?;
+        select_tags_from_response(&payload, id_to_slug).map_err(TagError::Transient)?;
     debug!(
         tags_count = selected.tags.len(),
         is_undetermined = selected.is_undetermined,
         "Decision API classified meme tags"
     );
     Ok(selected)
+}
+
+pub async fn classify_meme_tags(
+    api_key: &str,
+    ocr_text: &str,
+    description_uk: &str,
+    description_en: &str,
+    title: &str,
+    taxonomy: &[DynamicTagDef],
+) -> Result<TagClassification, TagError> {
+    let input = build_tagger_input(ocr_text, description_uk, description_en, title);
+    if input.is_empty() {
+        return Ok(TagClassification {
+            tags: Vec::new(),
+            is_undetermined: false,
+        });
+    }
+
+    let (questions, id_to_slug) = build_decision_questions(taxonomy);
+
+    match request_decision_tags(api_key, &input, &questions, &id_to_slug).await {
+        Ok(selected) => Ok(selected),
+        Err(TagError::ContentBlocked(first_err)) => {
+            let en_trimmed = description_en.trim();
+            if !en_trimmed.is_empty() {
+                let fallback_input = format!("Description: {}", en_trimmed);
+                if fallback_input != input {
+                    warn!("Decision API blocked full meme text; retrying with sanitized English description only");
+                    match request_decision_tags(api_key, &fallback_input, &questions, &id_to_slug)
+                        .await
+                    {
+                        Ok(selected) => {
+                            info!(
+                                tags_count = selected.tags.len(),
+                                "Decision API classified meme via English description fallback"
+                            );
+                            return Ok(selected);
+                        }
+                        Err(TagError::ContentBlocked(_)) => {
+                            return Err(TagError::ContentBlocked(first_err));
+                        }
+                        Err(other) => return Err(other),
+                    }
+                }
+            }
+            Err(TagError::ContentBlocked(first_err))
+        }
+        Err(other) => Err(other),
+    }
 }
 
 fn sanitize_proposed_slug(raw: &str) -> Option<String> {
@@ -861,5 +910,25 @@ mod tests {
         assert_eq!(parsed[0].emoji, "🚗");
         assert_eq!(parsed[1].slug, "музика");
         assert_eq!(parsed[1].emoji, "🎵");
+    }
+
+    #[test]
+    fn is_input_blocked_error_detects_policy_blocks_only_on_400() {
+        assert!(is_input_blocked_error(
+            StatusCode::BAD_REQUEST,
+            "Input blocked: The prompt contains sensitive words that violate Google's Generative AI Prohibited Use policy."
+        ));
+        assert!(is_input_blocked_error(
+            StatusCode::BAD_REQUEST,
+            "Request failed due to Prohibited Use Policy violation"
+        ));
+        assert!(!is_input_blocked_error(
+            StatusCode::BAD_REQUEST,
+            "question IDs must be 1-64 characters"
+        ));
+        assert!(!is_input_blocked_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "Input blocked"
+        ));
     }
 }

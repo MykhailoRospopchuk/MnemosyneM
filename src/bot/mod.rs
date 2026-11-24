@@ -154,6 +154,9 @@ pub async fn message_handler(
                 Ok(Command::Tags) => {
                     comand::tags(bot, msg, state).await?;
                 }
+                Ok(Command::My) => {
+                    meme_actions::cmd_my(bot, msg, state).await?;
+                }
                 Err(_) => {
                     comand::error(bot, msg).await?;
                 }
@@ -192,6 +195,9 @@ pub async fn message_handler(
                 Command::Help => {
                     comand::help(bot, msg).await?;
                 }
+                Command::My => {
+                    meme_actions::cmd_my(bot, msg, state).await?;
+                }
             }
             return Ok(());
         }
@@ -223,6 +229,9 @@ pub async fn callback_handler(
         }
         if data.starts_with("meme:") {
             return meme_actions::handle_meme_callback(bot, callback_query, state, &data).await;
+        }
+        if data.starts_with("my:") {
+            return meme_actions::handle_my_callback(bot, callback_query, state, &data).await;
         }
         if data.starts_with("random:") {
             return comand::handle_random_callback(bot, callback_query, state, &data).await;

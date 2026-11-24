@@ -638,7 +638,7 @@ Meme ID: 1793041234
   - [x] Triple-barrier automated quarantine / rejection for explicit content / NSFW.
   - [x] Nuanced NSFW policy: strict photographic nudity protection with explicit cultural art/medieval illustration exemptions.
   - [x] Add `gemini-decision-1` pre-ingestion safety & spam gate (`noul` on `10K RPD` quota before calling `Flash Lite`, preventing comic false positives and saving generative quota).
-  - [ ] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
+  - [x] Transparent rejection UX: reply directly to the specific rejected meme on Gemini safety filter trigger with clear error explanation.
   - [ ] Telegram-native admin moderation channel/chat with inline action buttons.
 - [ ] **v0.4: Custom Vector Engine from Scratch**
   - [ ] Criterion micro-benchmarks suite for 768-dim vector cosine similarity.

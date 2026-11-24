@@ -7,7 +7,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::config::AppConfig;
 use crate::constants::{
-    CURRENT_TAGS_VERSION, CURRENT_VLM_VERSION, TAGS_STATE_REVIEWED_OTHER, TAGS_STATE_UNDETERMINED,
+    CURRENT_TAGS_VERSION, CURRENT_VLM_VERSION, TAGS_STATE_BLOCKED, TAGS_STATE_REVIEWED_OTHER,
+    TAGS_STATE_UNDETERMINED,
 };
 use crate::database::entity::media_type::MediaType;
 use crate::database::enums::vlm_error_enum::VlmError;
@@ -336,6 +337,24 @@ async fn backfill_tags(
                 );
                 break;
             }
+            Err(TagError::ContentBlocked(e)) => {
+                warn!(
+                    meme_id = item.id,
+                    error = %e,
+                    "Decision API blocked meme text; marking as blocked/#інше"
+                );
+                let save_res = {
+                    let mut store = state.meme_store.lock().await;
+                    store.set_meme_tags(
+                        item.id,
+                        &[(tagger::OTHER_TAG_SLUG.to_string(), 1.0)],
+                        TAGS_STATE_BLOCKED,
+                    )
+                };
+                if let Err(err) = save_res {
+                    warn!(meme_id = item.id, error = %err, "Failed to mark blocked meme tags");
+                }
+            }
             Err(TagError::Transient(e)) => {
                 consecutive_errors += 1;
                 warn!(
@@ -501,6 +520,24 @@ async fn discover_new_categories(
                     "Decision API rate-limited during discovery re-classification; pausing"
                 );
                 break;
+            }
+            Err(TagError::ContentBlocked(e)) => {
+                warn!(
+                    meme_id,
+                    error = %e,
+                    "Decision API blocked meme text during discovery re-classification; marking as blocked/#інше"
+                );
+                let save_res = {
+                    let mut store = state.meme_store.lock().await;
+                    store.set_meme_tags(
+                        meme_id,
+                        &[(tagger::OTHER_TAG_SLUG.to_string(), 1.0)],
+                        TAGS_STATE_BLOCKED,
+                    )
+                };
+                if let Err(err) = save_res {
+                    warn!(meme_id, error = %err, "Failed to mark blocked discovery meme tags");
+                }
             }
             Err(TagError::Transient(e)) => {
                 consecutive_errors += 1;

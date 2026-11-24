@@ -24,4 +24,6 @@ pub enum Command {
     Drip,
     #[command(description = "Browse meme categories and tags")]
     Tags,
+    #[command(description = "Browse and manage your uploaded memes")]
+    My,
 }

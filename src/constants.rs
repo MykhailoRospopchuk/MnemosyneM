@@ -2,3 +2,4 @@ pub const CURRENT_VLM_VERSION: i64 = 2;
 pub const CURRENT_TAGS_VERSION: i64 = 1;
 pub const TAGS_STATE_UNDETERMINED: i64 = -1;
 pub const TAGS_STATE_REVIEWED_OTHER: i64 = -2;
+pub const TAGS_STATE_BLOCKED: i64 = -3;

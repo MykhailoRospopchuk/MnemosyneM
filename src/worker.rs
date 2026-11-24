@@ -444,6 +444,30 @@ pub fn start_worker(
                                 ),
                             }
                         }
+                        Err(crate::tagger::TagError::ContentBlocked(e)) => {
+                            warn!(
+                                user_id,
+                                meme_id = saved_id,
+                                error = %e,
+                                "Decision API blocked meme text; marking as blocked/#інше"
+                            );
+                            let tag_save_res = {
+                                let mut meme_store = state.meme_store.lock().await;
+                                meme_store.set_meme_tags(
+                                    saved_id,
+                                    &[(crate::tagger::OTHER_TAG_SLUG.to_string(), 1.0)],
+                                    constants::TAGS_STATE_BLOCKED,
+                                )
+                            };
+                            if let Err(err) = tag_save_res {
+                                warn!(
+                                    user_id,
+                                    meme_id = saved_id,
+                                    error = %err,
+                                    "Failed to mark blocked meme tags"
+                                );
+                            }
+                        }
                         Err(e) => {
                             warn!(
                                 user_id,
