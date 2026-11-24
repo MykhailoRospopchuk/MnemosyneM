@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use fastembed::{EmbeddingModel, TextEmbedding, TextInitOptions};
 
 pub struct ClipEngine {
@@ -6,9 +8,14 @@ pub struct ClipEngine {
 
 impl ClipEngine {
     pub fn new() -> Result<Self, String> {
-        let text_model =
-            TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::MultilingualE5Base))
-                .map_err(|e| e.to_string())?;
+        let mut options = TextInitOptions::new(EmbeddingModel::MultilingualE5Base);
+        if let Ok(cache_dir) = std::env::var("FASTEMBED_CACHE_DIR")
+            && !cache_dir.trim().is_empty()
+        {
+            options = options.with_cache_dir(PathBuf::from(cache_dir));
+        }
+
+        let text_model = TextEmbedding::try_new(options).map_err(|e| e.to_string())?;
 
         Ok(Self { text_model })
     }

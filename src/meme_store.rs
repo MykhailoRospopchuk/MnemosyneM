@@ -198,6 +198,19 @@ struct Fts35 {
 }
 
 impl MemeStore {
+    pub fn backup_to(&self, dest: &Path) -> Result<(), String> {
+        if dest.exists() {
+            let _ = std::fs::remove_file(dest);
+        }
+        let dest_str = dest
+            .to_str()
+            .ok_or_else(|| "Invalid backup destination path".to_string())?;
+        self.conn
+            .execute("VACUUM INTO ?1", params![dest_str])
+            .map_err(|e| format!("VACUUM INTO failed: {}", e))?;
+        Ok(())
+    }
+
     pub fn check_or_add_bookmark(
         &mut self,
         unique_id: &str,
