@@ -110,6 +110,24 @@ pub(crate) async fn persist_dirty_vlm_quotas(state: &AppState) {
     }
 }
 
+fn apply_pending_db_restore(db_path: &str) {
+    let incoming = format!("{}.incoming", db_path);
+    let incoming_path = std::path::Path::new(&incoming);
+    if !incoming_path.exists() {
+        return;
+    }
+
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = format!("{}{}", db_path, suffix);
+        let _ = std::fs::remove_file(&sidecar);
+    }
+
+    match std::fs::rename(incoming_path, db_path) {
+        Ok(()) => info!(db_path = %db_path, "Applied pending database restore"),
+        Err(e) => warn!(db_path = %db_path, error = %e, "Failed to apply pending database restore"),
+    }
+}
+
 #[tokio::main]
 async fn main() {
     dotenvy::dotenv().ok();
@@ -119,6 +137,8 @@ async fn main() {
     let app_config = config::load_config();
 
     info!("Loading storage and embedding models");
+
+    apply_pending_db_restore(&app_config.db_path);
 
     let mut engine = engine::ClipEngine::new().expect("Failed to create clip engine");
     migrations::run(&app_config.db_path, &mut engine).expect("Failed to run migration");

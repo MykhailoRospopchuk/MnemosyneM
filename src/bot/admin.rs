@@ -444,6 +444,110 @@ pub async fn cmd_backup(
     Ok(())
 }
 
+pub async fn cmd_restore(
+    bot: Bot,
+    msg: Message,
+    app_config: &'static AppConfig,
+) -> ResponseResult<()> {
+    let user_id = msg.from.as_ref().map(|u| u.id.0 as i64).unwrap_or(msg.chat.id.0);
+    if !app_config.is_admin(user_id) {
+        bot.send_message(msg.chat.id, "⛔ Доступ лише для адміністратора.")
+            .await?;
+        return Ok(());
+    }
+
+    let doc = msg
+        .document()
+        .or_else(|| msg.reply_to_message().and_then(|r| r.document()));
+
+    let Some(doc) = doc else {
+        bot.send_message(
+            msg.chat.id,
+            "📥 Надішли `.db` файл із підписом `/restore` або відповідай `/restore` на повідомлення з `.db` файлом.",
+        )
+        .await?;
+        return Ok(());
+    };
+
+    bot.send_message(msg.chat.id, "⏳ Завантажую та перевіряю БД...")
+        .await?;
+
+    let bytes = match download_telegram_file(&bot, &doc.file.id.0, 3).await {
+        Ok(b) => b,
+        Err(e) => {
+            bot.send_message(msg.chat.id, format!("❌ Не вдалося завантажити файл: {}", e))
+                .await?;
+            return Ok(());
+        }
+    };
+
+    if !bytes.starts_with(b"SQLite format 3\0") {
+        bot.send_message(msg.chat.id, "❌ Файл не є валідною SQLite-базою.")
+            .await?;
+        return Ok(());
+    }
+
+    let tmp_path = format!("{}.incoming.tmp", app_config.db_path);
+    let incoming_path = format!("{}.incoming", app_config.db_path);
+
+    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+        bot.send_message(msg.chat.id, format!("❌ Не вдалося записати файл: {}", e))
+            .await?;
+        return Ok(());
+    }
+
+    let meme_count: Result<i64, String> = (|| {
+        let conn = rusqlite::Connection::open_with_flags(
+            &tmp_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .map_err(|e| e.to_string())?;
+        conn.query_row("SELECT COUNT(*) FROM memes", [], |row| row.get(0))
+            .map_err(|e| e.to_string())
+    })();
+
+    let count = match meme_count {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp_path);
+            bot.send_message(
+                msg.chat.id,
+                format!("❌ Перевірка БД не пройшла (таблиця memes): {}", e),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+
+    if let Err(e) = std::fs::rename(&tmp_path, &incoming_path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        bot.send_message(msg.chat.id, format!("❌ Не вдалося підготувати БД: {}", e))
+            .await?;
+        return Ok(());
+    }
+
+    let size_mb = bytes.len() as f64 / (1024.0 * 1024.0);
+    info!(
+        admin_id = user_id,
+        meme_count = count,
+        size_mb,
+        "Database restore staged; restarting process to apply"
+    );
+
+    let _ = bot
+        .send_message(
+            msg.chat.id,
+            format!(
+                "✅ БД перевірено ({} мемів, {:.2} MB). Перезапускаю бота для застосування...",
+                count, size_mb
+            ),
+        )
+        .await;
+
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    std::process::exit(1);
+}
+
 async fn send_or_edit_admin_media(
     bot: &Bot,
     msg: &Message,
