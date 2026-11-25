@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libssl3 \
     libstdc++6 \
     sqlite3 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
