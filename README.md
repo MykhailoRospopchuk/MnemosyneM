@@ -72,7 +72,9 @@ flowchart LR
 | `/drip` | Configure scheduled meme delivery (`1 / 3 / 5` per day), timezone, and quiet hours |
 | `/settings` | Set default upload visibility, search scope, and reset ratings |
 | `/stats` | Corpus stats, VLM free-tier quota pool status, and search latency telemetry |
-| `/admin` | Admin-only moderation queue, catalog cleanup, and tag toggles |
+| `/admin` | Admin-only moderation queue, catalog cleanup, tag toggles, and DB backup button |
+| `/backup` | Admin-only online SQLite snapshot (`VACUUM INTO`) sent directly to Telegram |
+| `/restore` | Admin-only DB restore: send a `.db` file with caption `/restore` (or reply `/restore` to it) to validate, swap, and restart |
 
 **Search examples (works in DM chat and `@your_bot` inline mode):**
 
@@ -102,6 +104,7 @@ cp .env.example .env
 | :--- | :--- | :--- |
 | `TELOXIDE_TOKEN` | *required* | Telegram bot token |
 | `DB_PATH` | *required* | Path to SQLite database file (created & migrated automatically) |
+| `FASTEMBED_CACHE_DIR` | `.fastembed_cache` | Directory for cached ONNX models (e.g. `/data/fastembed_cache` on a persistent volume) |
 | `GEMINI_API_KEY` | *required* | Google AI Studio API key |
 | `TOP_K` | `3` | Maximum search results returned per query |
 | `MAX_PHASH_DISTANCE` | `5` | Max Hamming distance to treat visually similar memes as duplicates |
